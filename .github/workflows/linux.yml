@@ -55,50 +55,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - target: aarch64-linux-musl
-          os: ubuntu-latest
-          URL: aarch64-linux-musl
-          ARCH_FLAG: linux-aarch64
+        # - target: aarch64-linux-musl
+        #   os: ubuntu-latest
+        #   URL: aarch64-linux-musl
+        #   ARCH_FLAG: linux-aarch64
 
-        - target: x86_64-linux-musl
-          os: ubuntu-latest
-          URL: x86_64-linux-musl
-          ARCH_FLAG: linux-x86_64
+        # - target: x86_64-linux-musl
+        #   os: ubuntu-latest
+        #   URL: x86_64-linux-musl
+        #   ARCH_FLAG: linux-x86_64
 
-        - target: i686-linux-musl
-          os: ubuntu-latest
-          URL: i686-linux-musl
-          ARCH_FLAG: linux-generic32
+        # - target: i686-linux-musl
+        #   os: ubuntu-latest
+        #   URL: i686-linux-musl
+        #   ARCH_FLAG: linux-generic32
 
-        - target: armv7-linux-musleabihf
-          os: ubuntu-latest
-          URL: armv7l-linux-musleabihf
-          ARCH_FLAG: linux-armv4
+        # - target: armv7-linux-musleabihf
+        #   os: ubuntu-latest
+        #   URL: armv7l-linux-musleabihf
+        #   ARCH_FLAG: linux-armv4
 
-        - target: armv7-linux-musleabi
-          os: ubuntu-latest
-          URL: armv7m-linux-musleabi
-          ARCH_FLAG: linux-armv4
+        # - target: armv7-linux-musleabi
+        #   os: ubuntu-latest
+        #   URL: armv7m-linux-musleabi
+        #   ARCH_FLAG: linux-armv4
 
-        - target: arm-linux-musleabihf
-          os: ubuntu-latest
-          URL: arm-linux-musleabihf
-          ARCH_FLAG: linux-armv4
+        # - target: arm-linux-musleabihf
+        #   os: ubuntu-latest
+        #   URL: arm-linux-musleabihf
+        #   ARCH_FLAG: linux-armv4
 
-        - target: arm-linux-musleabi
-          os: ubuntu-latest
-          URL: arm-linux-musleabi
-          ARCH_FLAG: linux-armv4
+        # - target: arm-linux-musleabi
+        #   os: ubuntu-latest
+        #   URL: arm-linux-musleabi
+        #   ARCH_FLAG: linux-armv4
 
         - target: mipsel-linux-musl
           os: ubuntu-latest
           URL: mipsel-linux-muslsf
           ARCH_FLAG: linux-mips32
 
-        - target: mips-linux-musl
-          os: ubuntu-latest
-          URL: mips-linux-muslsf
-          ARCH_FLAG: linux-mips32
+        # - target: mips-linux-musl
+        #   os: ubuntu-latest
+        #   URL: mips-linux-muslsf
+        #   ARCH_FLAG: linux-mips32
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -184,7 +184,7 @@ jobs:
             --enable-opensslall \
             --enable-opensslextra \
             --enable-keylog-export \
-            --disable-examples --disable-programs --disable-docs \
+            --disable-examples \
             CFLAGS="$COMMON_CFLAGS" LDFLAGS="$COMMON_LDFLAGS"
           make -j$(nproc)
           make install
