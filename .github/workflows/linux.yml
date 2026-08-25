@@ -1,4 +1,4 @@
-name: xfrpc-mipsel
+name: compile xfrpc in ubuntu-latest
 
 on:
   # Only manual trigger from Actions tab
@@ -20,6 +20,24 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libjson-c-dev libevent-dev libssl-dev gcc-14 g++-14
 
+    - name: compile xfrpc-x86_64
+      env:
+        CC: gcc-14
+        CXX: g++-14
+      run: |
+        mkdir build
+        cd build
+        cmake ..
+        make
+        ls -ltr
+
+        mkdir /tmp/build -p
+        mv xfrpc /tmp/build/xfrpc-x86_64
+
+        make clean
+        cd ../
+        rm -rf build
+
     - name: Install MIPS cross-compiler
       run: |
         mkdir temp
@@ -35,10 +53,10 @@ jobs:
         cd ../
         rm -rf temp
 
-    - name: compile xfrpc
+    - name: compile xfrpc-mipsel
       env:
-        CC: gcc-14
-        CXX: g++-14
+        CC: mipsel-thingino-linux-musl-gcc
+        CXX: mipsel-thingino-linux-musl-g++
       run: |
         mkdir build
         cd build
@@ -51,11 +69,13 @@ jobs:
         make
         ls -ltr
 
+        mv xfrpc /tmp/build/xfrpc-mipsel
+
     - name: Upload build artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: xfrpc-mipsel
-        path: build/*
+        name: xfrpc
+        path: /tmp/build/*
         retention-days: 7
     
