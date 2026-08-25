@@ -21,11 +21,17 @@ on:
         description: '指定Release的版本号（留空为源码提交哈希值）'
         required: false
         default: ''
+      wolfssl:
+        description: '是否使用 wolfSSL 作为 TLS 后端（需 sysroot 中已编译 wolfSSL）'
+        required: true
+        default: false
+        type: boolean
 
 env:
   # 依赖库版本 - 统一在此修改
   ZLIB_VER: 1.3.1
   OPENSSL_VER: 3.5.7
+  WOLFSSL_VER: v5.8.0-stable
   JSONC_VER: 0.19
   JSONC_TAG: json-c-0.19-20260627
   LIBEVENT_VER: 2.1.13
@@ -35,6 +41,7 @@ env:
   branch: "${{ github.event.inputs.branch }}"
   tag: "${{ github.event.inputs.tag }}"
   rel: "${{ github.event.inputs.rel }}"
+  wolfssl: "${{ github.event.inputs.wolfssl }}"
   TZ: Asia/Shanghai
 
 permissions:
@@ -150,7 +157,46 @@ jobs:
         ls -lh $SYSROOT/lib/libz.a
 
         # ============================================================
-        # 2. 编译 OpenSSL ${{ env.OPENSSL_VER }} — TLS/SSL 后端（含 QUIC，无冗余组件）
+        # 2. 编译 wolfSSL ${{ env.WOLFSSL_VER }} — TLS/SSL 后端（含 QUIC，无冗余组件）
+        # ============================================================
+        if [ "${{ env.wolfssl }}" = "true" ]; then
+          echo -e "\n\n\n\033[36m===== [2/5] 编译 wolfSSL =====\033[0m"
+          mkdir wolfssl-src && \
+            curl -sL https://github.com/wolfSSL/wolfssl/archive/refs/tags/${{ env.WOLFSSL_VER }}.tar.gz | \
+            tar xz -C wolfssl-src --strip-components=1
+          cd wolfssl-src
+          # GitHub 源码包不含 configure 脚本，需 autoreconf 生成
+          ./autogen.sh
+          # 交叉编译 wolfSSL
+          # --enable-quic: ngtcp2_crypto_wolfssl 后端必需（quic_transport.c 依赖）
+          # --enable-opensslall/-extra: OpenSSL 兼容层（crypto.c 的 PBKDF2/AES 使用）
+          # --enable-tls13/session-ticket/earlydata: QUIC 握手与 0-RTT 所需
+          CC=$CC AR=$AR RANLIB=$RANLIB ./configure \
+            --host=$TARGET_TRIPLE \
+            --prefix=$SYSROOT \
+            --libdir=$SYSROOT/lib \
+            --includedir=$SYSROOT/include \
+            --enable-static --disable-shared \
+            --enable-quic \
+            --enable-tls13 \
+            --enable-session-ticket \
+            --enable-earlydata \
+            --enable-opensslall \
+            --enable-opensslextra \
+            --enable-keylog-export \
+            --disable-examples --disable-programs --disable-docs \
+            CFLAGS="$COMMON_CFLAGS" LDFLAGS="$COMMON_LDFLAGS"
+          make -j$(nproc)
+          make install
+          cd ..
+          echo -e "\n\033[32m✓ wolfSSL 编译完成\033[0m"
+          ls -lh $SYSROOT/lib/libwolfssl.a
+        fi
+
+        # ============================================================
+        # 2. 编译 OpenSSL ${{ env.OPENSSL_VER }} — libevent bufferevent_openssl 硬依赖
+        #    xfrpc tls.c 经 libevent 使用真实 OpenSSL（CMakeLists 硬编码 event_openssl），
+        #    故 OpenSSL 始终编译；wolfSSL 模式下 wolfSSL(QUIC+PBKDF2) 与 OpenSSL 共存
         # ============================================================
         echo -e "\n\n\n\033[36m===== [2/5] 编译 OpenSSL =====\033[0m"
         mkdir openssl-src && \
@@ -174,38 +220,50 @@ jobs:
         ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
 
         # ============================================================
-        # 3. 编译 ngtcp2 ${{ env.NGTCP2_VER }} — QUIC 传输层（OpenSSL crypto backend）
+        # 3. 编译 ngtcp2 ${{ env.NGTCP2_VER }} — QUIC 传输层
+        #    crypto 后端随 wolfssl 开关切换：wolfssl=true→wolfSSL，否则 OpenSSL
         # ============================================================
         echo -e "\n\n\n\033[36m===== [3/5] 编译 ngtcp2 =====\033[0m"
         mkdir ngtcp2-src && \
           curl -sL https://github.com/ngtcp2/ngtcp2/archive/refs/tags/v${{ env.NGTCP2_VER }}.tar.gz | \
           tar xz -C ngtcp2-src --strip-components=1
         cd ngtcp2-src
+        # 按 TLS 后端选择 ngtcp2 crypto 后端
+        if [ "${{ env.wolfssl }}" = "true" ]; then
+          CRYPTO_BACKEND=wolfssl
+          # wolfSSL 后端：启用 ENABLE_WOLFSSL，关闭 OpenSSL 避免 SysRoot 无 libssl 时报错
+          CMAKE_CRYPTO_OPTS="-DENABLE_WOLFSSL=ON -DENABLE_OPENSSL=OFF -DWOLFSSL_ROOT_DIR=$SYSROOT"
+          CRYPTO_TARGET=ngtcp2_crypto_wolfssl_static
+        else
+          CRYPTO_BACKEND=ossl
+          # HAVE_SSL_PROVIDE_QUIC_DATA=FALSE: OpenSSL<3.1 无该 API，避免编译错误
+          CMAKE_CRYPTO_OPTS="-DENABLE_OPENSSL=ON -DOPENSSL_ROOT_DIR=$SYSROOT -DHAVE_SSL_PROVIDE_QUIC_DATA=FALSE"
+          CRYPTO_TARGET=ngtcp2_crypto_ossl_static
+        fi
         # ENABLE_LIB_ONLY 只编译库，跳过工具和测试
         cmake -B build -DCMAKE_C_COMPILER=$CC \
           -DCMAKE_INSTALL_PREFIX=$SYSROOT \
           -DBUILD_SHARED_LIBS=OFF \
           -DENABLE_LIB_ONLY=ON \
           -DBUILD_TESTING=OFF \
-          -DOPENSSL_ROOT_DIR=$SYSROOT \
           -DCMAKE_FIND_ROOT_PATH=$SYSROOT \
-          -DHAVE_SSL_PROVIDE_QUIC_DATA=FALSE \
+          $CMAKE_CRYPTO_OPTS \
           -DCMAKE_C_FLAGS="$COMMON_CFLAGS" \
           -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"
         # 只编译静态库，跳过共享库（避免 -static 与 .so 冲突）
         cmake --build build -j$(nproc) \
           --target ngtcp2_static \
-          --target ngtcp2_crypto_ossl_static
+          --target $CRYPTO_TARGET
         # cmake --install 会尝试安装不存在的 .so，手动复制
         cp build/lib/libngtcp2*.a $SYSROOT/lib/
-        # ngtcp2_crypto_ossl 在 crypto/ossl/ 子目录下
-        cp build/crypto/ossl/libngtcp2_crypto_ossl*.a $SYSROOT/lib/ 2>/dev/null || :
+        # crypto 后端库在 crypto/$CRYPTO_BACKEND/ 子目录下
+        cp build/crypto/$CRYPTO_BACKEND/libngtcp2_crypto_*.a $SYSROOT/lib/ 2>/dev/null || :
         cp -r lib/includes/* $SYSROOT/include/
         cp -r crypto/includes/* $SYSROOT/include/
         # 复制 cmake 生成的 version.h（不在源码树中）
         cp build/lib/includes/ngtcp2/version.h $SYSROOT/include/ngtcp2/ 2>/dev/null || :
         cd ..
-        echo -e "\n\033[32m✓ ngtcp2 编译完成\033[0m"
+        echo -e "\n\033[32m✓ ngtcp2 编译完成（${CRYPTO_BACKEND} 后端）\033[0m"
         ls -lh $SYSROOT/lib/libngtcp2*.a
 
         # ============================================================
@@ -277,7 +335,7 @@ jobs:
           -DCMAKE_C_FLAGS="$COMMON_CFLAGS $CFLAGS" \
           -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS $LDFLAGS -Wl,--start-group" \
           -DCMAKE_FIND_ROOT_PATH=$SYSROOT \
-          -DUSE_WOLFSSL=OFF \
+          -DUSE_WOLFSSL=${{ env.wolfssl == 'true' && 'ON' || 'OFF' }} \
           -DLIBEVENT_INCLUDE_DIR=$SYSROOT/include \
           -DLIBEVENT_LIB=$SYSROOT/lib/libevent.a \
           -DLIBEVENT_CORE_LIB=$SYSROOT/lib/libevent_core.a \
