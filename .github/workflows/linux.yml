@@ -1,81 +1,460 @@
 name: compile xfrpc in ubuntu-latest
 
 on:
-  # Only manual trigger from Actions tab
   workflow_dispatch:
+    inputs:
+      branch:
+        description: '编译xfrpc源码的分支或版本号，默认主分支master'
+        required: true
+        default: 'master'
+      del:
+        description: '是否删除历史编译的流程记录'
+        required: true
+        default: true
+        type: boolean
+      rel:
+        description: '编译完成后是否发布Release'
+        required: true
+        default: true
+        type: boolean
+      tag:
+        description: '指定Release的版本号（留空为源码提交哈希值）'
+        required: false
+        default: ''
 
 env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # 依赖库版本 - 统一在此修改
+  ZLIB_VER: 1.3.1
+  OPENSSL_VER: 3.5.7
+  JSONC_VER: 0.19
+  JSONC_TAG: json-c-0.19-20260627
+  LIBEVENT_VER: 2.1.13
+  LIBEVENT_TAG: release-2.1.13-stable
+  NGTCP2_VER: 1.24.0
+
+  branch: "${{ github.event.inputs.branch }}"
+  tag: "${{ github.event.inputs.tag }}"
+  rel: "${{ github.event.inputs.rel }}"
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: aarch64-linux-musl
+          os: ubuntu-latest
+          URL: aarch64-linux-musl
+          ARCH_FLAG: linux-aarch64
 
-    runs-on: ubuntu-24.04
+        - target: x86_64-linux-musl
+          os: ubuntu-latest
+          URL: x86_64-linux-musl
+          ARCH_FLAG: linux-x86_64
 
+        - target: i686-linux-musl
+          os: ubuntu-latest
+          URL: i686-linux-musl
+          ARCH_FLAG: linux-generic32
+
+        - target: armv7-linux-musleabihf
+          os: ubuntu-latest
+          URL: armv7l-linux-musleabihf
+          ARCH_FLAG: linux-armv4
+
+        - target: armv7-linux-musleabi
+          os: ubuntu-latest
+          URL: armv7m-linux-musleabi
+          ARCH_FLAG: linux-armv4
+
+        - target: arm-linux-musleabihf
+          os: ubuntu-latest
+          URL: arm-linux-musleabihf
+          ARCH_FLAG: linux-armv4
+
+        - target: arm-linux-musleabi
+          os: ubuntu-latest
+          URL: arm-linux-musleabi
+          ARCH_FLAG: linux-armv4
+
+        - target: mipsel-linux-musl
+          os: ubuntu-latest
+          URL: mipsel-linux-muslsf
+          ARCH_FLAG: linux-mips32
+
+        - target: mips-linux-musl
+          os: ubuntu-latest
+          URL: mips-linux-muslsf
+          ARCH_FLAG: linux-mips32
+
+    runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    
-    - name: prepare build environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libjson-c-dev libevent-dev libssl-dev gcc-14 g++-14
-
-    - name: compile xfrpc-x86_64
-      env:
-        CC: gcc-14
-        CXX: g++-14
-      run: |
-        mkdir build
-        cd build
-        cmake ..
-        make
-        ls -ltr
-
-        mkdir /tmp/build -p
-        mv xfrpc /tmp/build/xfrpc-x86_64
-
-        make clean
-        cd ../
-        rm -rf build
-
-    - name: Install MIPS cross-compiler
-      run: |
-        mkdir temp
-        cd temp
-        wget https://github.com/themactep/thingino-firmware/releases/download/toolchain-x86_64/thingino-toolchain-x86_64_xburst1_4_4_musl_gcc16-linux-mipsel.tar.gz
-        tar -xzf thingino-toolchain-x86_64_xburst1_4_4_musl_gcc16-linux-mipsel.tar.gz
-        mv mipsel-thingino-linux-musl_sdk-buildroot /tmp/
-        ls -ltr /tmp/mipsel-thingino-linux-musl_sdk-buildroot/
-        /tmp/mipsel-thingino-linux-musl_sdk-buildroot/relocate-sdk.sh
-        echo "/tmp/mipsel-thingino-linux-musl_sdk-buildroot/bin" >> $GITHUB_PATH
-        echo "TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot" >> $GITHUB_ENV
-        echo "PATH=${TOOLCHAIN_DIR}/bin:$PATH" >> $GITHUB_ENV
-        cd ../
-        rm -rf temp
-
-    - name: compile xfrpc-mipsel
-      env:
-        CC: mipsel-thingino-linux-musl-gcc
-        CXX: mipsel-thingino-linux-musl-g++
-      run: |
-        mkdir build
-        cd build
-
-        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
-        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
-        c_compiler=mipsel-thingino-linux-musl-gcc
-        cpp_compiler=mipsel-thingino-linux-musl-g++
-        cmake -DCMAKE_CXX_COMPILER=${cpp_compiler} -DCMAKE_C_COMPILER=${c_compiler} ..
-        make
-        ls -ltr
-
-        mv xfrpc /tmp/build/xfrpc-mipsel
-
-    - name: Upload build artifacts
-      if: success()
-      uses: actions/upload-artifact@v4
+    - name: Checkout xfrpc 源码
+      uses: actions/checkout@main
       with:
-        name: xfrpc
-        path: /tmp/build/*
-        retention-days: 7
-    
+        repository: liudf0716/xfrpc
+        ref: ${{ env.branch }}
+
+    - name: 下载 musl-gcc 交叉编译工具链
+      uses: lmq8267/dl-musl@main
+      with:
+        target: ${{ matrix.URL }}
+        static: true
+        gccpath: /tmp
+
+    - name: 恢复依赖库编译缓存
+      id: cache-sysroot
+      uses: actions/cache@v4
+      with:
+        path: /tmp/sysroot
+        key: xfrpc-sysroot-${{ matrix.target }}-${{ hashFiles('.github/workflows/xfrpc.yml') }}
+        restore-keys: |
+          xfrpc-sysroot-${{ matrix.target }}
+
+    - name: 交叉编译所有依赖库 (zlib + OpenSSL + ngtcp2 + json-c + libevent)
+      if: steps.cache-sysroot.outputs.cache-hit != 'true'
+      id: build-deps
+      run: |
+        SYSROOT=/tmp/sysroot
+        mkdir -p $SYSROOT
+
+        # 从交叉编译器获取目标三元组（仅用于日志）
+        TARGET_TRIPLE=$($CC -dumpmachine)
+        echo "目标三元组: $TARGET_TRIPLE"
+        echo "编译器: $CC"
+
+        # 设置公共编译和链接标志
+        COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections"
+        COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections"
+
+        # ============================================================
+        # 1. 编译 zlib 1.3.1 — 压缩库
+        # ============================================================
+        echo -e "\n\033[36m===== [1/5] 编译 zlib =====\033[0m"
+        mkdir zlib-src && \
+          curl -sL https://github.com/madler/zlib/archive/refs/tags/v${{ env.ZLIB_VER }}.tar.gz | \
+          tar xz -C zlib-src --strip-components=1
+        cd zlib-src
+        CC=$CC AR=$AR RANLIB=$RANLIB \
+          ./configure --prefix=$SYSROOT --static --libdir=$SYSROOT/lib --includedir=$SYSROOT/include
+        make -j$(nproc)
+        make install
+        cd ..
+        echo -e "\n\033[32m✓ zlib 编译完成\033[0m"
+        ls -lh $SYSROOT/lib/libz.a
+
+        # ============================================================
+        # 2. 编译 OpenSSL ${{ env.OPENSSL_VER }} — TLS/SSL 后端（含 QUIC，无冗余组件）
+        # ============================================================
+        echo -e "\n\n\n\033[36m===== [2/5] 编译 OpenSSL =====\033[0m"
+        mkdir openssl-src && \
+          curl -sL https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VER }}/openssl-${{ env.OPENSSL_VER }}.tar.gz | \
+          tar xz -C openssl-src --strip-components=1
+        cd openssl-src
+        # CC 环境变量指向交叉编译器，Configure 会自动使用
+        # ARCH_FLAG 来自矩阵 (linux-aarch64, linux-x86_64, mingw64 等)
+        CC=$CC ./Configure ${{ matrix.ARCH_FLAG }} \
+          --prefix=$SYSROOT \
+          --openssldir=$SYSROOT/ssl \
+          --libdir=lib \
+          no-shared no-tests no-apps no-docs no-legacy \
+          enable-threads enable-quic \
+          no-comp no-ssl2 no-ssl3 no-weak-ssl-ciphers \
+          -fPIC
+        make -j$(nproc)
+        make install_sw
+        cd ..
+        echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
+        ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
+
+        # ============================================================
+        # 3. 编译 ngtcp2 ${{ env.NGTCP2_VER }} — QUIC 传输层（OpenSSL crypto backend）
+        # ============================================================
+        echo -e "\n\n\n\033[36m===== [3/5] 编译 ngtcp2 =====\033[0m"
+        mkdir ngtcp2-src && \
+          curl -sL https://github.com/ngtcp2/ngtcp2/archive/refs/tags/v${{ env.NGTCP2_VER }}.tar.gz | \
+          tar xz -C ngtcp2-src --strip-components=1
+        cd ngtcp2-src
+        # ENABLE_LIB_ONLY 只编译库，跳过工具和测试
+        cmake -B build -DCMAKE_C_COMPILER=$CC \
+          -DCMAKE_INSTALL_PREFIX=$SYSROOT \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DENABLE_LIB_ONLY=ON \
+          -DBUILD_TESTING=OFF \
+          -DOPENSSL_ROOT_DIR=$SYSROOT \
+          -DCMAKE_FIND_ROOT_PATH=$SYSROOT \
+          -DHAVE_SSL_PROVIDE_QUIC_DATA=FALSE \
+          -DCMAKE_C_FLAGS="$COMMON_CFLAGS" \
+          -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"
+        # 只编译静态库，跳过共享库（避免 -static 与 .so 冲突）
+        cmake --build build -j$(nproc) \
+          --target ngtcp2_static \
+          --target ngtcp2_crypto_ossl_static
+        # cmake --install 会尝试安装不存在的 .so，手动复制
+        cp build/lib/libngtcp2*.a $SYSROOT/lib/
+        # ngtcp2_crypto_ossl 在 crypto/ossl/ 子目录下
+        cp build/crypto/ossl/libngtcp2_crypto_ossl*.a $SYSROOT/lib/ 2>/dev/null || :
+        cp -r lib/includes/* $SYSROOT/include/
+        cp -r crypto/includes/* $SYSROOT/include/
+        # 复制 cmake 生成的 version.h（不在源码树中）
+        cp build/lib/includes/ngtcp2/version.h $SYSROOT/include/ngtcp2/ 2>/dev/null || :
+        cd ..
+        echo -e "\n\033[32m✓ ngtcp2 编译完成\033[0m"
+        ls -lh $SYSROOT/lib/libngtcp2*.a
+
+        # ============================================================
+        # 4. 编译 json-c ${{ env.JSONC_VER }} — JSON 解析库
+        # ============================================================
+        echo -e "\n\n\n\033[36m===== [4/5] 编译 json-c =====\033[0m"
+        mkdir jsonc-src && \
+          curl -sL https://github.com/json-c/json-c/releases/download/${{ env.JSONC_TAG }}/json-c-${{ env.JSONC_VER }}-nodoc.tar.gz | \
+          tar xz -C jsonc-src --strip-components=1
+        cd jsonc-src
+        cmake -B build -DCMAKE_C_COMPILER=$CC \
+          -DCMAKE_INSTALL_PREFIX=$SYSROOT \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_TESTS=OFF -DDISABLE_BSYMBOLIC=ON \
+          -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+          -DCMAKE_C_FLAGS="$COMMON_CFLAGS"
+        cmake --build build -j$(nproc)
+        cmake --install build
+        cd ..
+        echo -e "\n\033[32m✓ json-c 编译完成\033[0m"
+        ls -lh $SYSROOT/lib/libjson-c.a
+
+        # ============================================================
+        # 5. 编译 libevent ${{ env.LIBEVENT_VER }} — 事件循环库 (含 event_openssl)
+        # ============================================================
+        echo -e "\n\n\n\033[36m===== [5/5] 编译 libevent =====\033[0m"
+        mkdir libevent-src && \
+          curl -sL https://github.com/libevent/libevent/releases/download/${{ env.LIBEVENT_TAG }}/libevent-${{ env.LIBEVENT_VER }}-stable.tar.gz | \
+          tar xz -C libevent-src --strip-components=1
+        cd libevent-src
+        cmake -B build -DCMAKE_C_COMPILER=$CC \
+          -DCMAKE_INSTALL_PREFIX=$SYSROOT \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DEVENT__DISABLE_TESTS=ON -DEVENT__DISABLE_SAMPLES=ON -DEVENT__DISABLE_REGRESS=ON \
+          -DCMAKE_SHARED_LIBRARY_LINK_C_FLAGS="" \
+          -DOPENSSL_ROOT_DIR=$SYSROOT \
+          -DOPENSSL_INCLUDE_DIR=$SYSROOT/include \
+          -DOPENSSL_SSL_LIBRARY=$SYSROOT/lib/libssl.a \
+          -DOPENSSL_CRYPTO_LIBRARY=$SYSROOT/lib/libcrypto.a \
+          -DCMAKE_C_FLAGS="$COMMON_CFLAGS" \
+          -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"
+        # 只编译静态库，跳过共享库（避免 -static 与 .so 链接冲突）
+        cmake --build build -j$(nproc) \
+          --target event_core_static \
+          --target event_extra_static \
+          --target event_openssl_static \
+          --target event_pthreads_static \
+          --target event_static
+        # cmake --install 会尝试安装不存在的 .so，手动复制所需文件
+        cp build/lib/libevent*.a $SYSROOT/lib/
+        cp -r include/* $SYSROOT/include/
+        # 复制 cmake 生成的 config header（不在源码中）
+        cp build/include/event2/event-config.h $SYSROOT/include/event2/
+        echo -e "\n\033[32m✓ libevent 编译完成\033[0m"
+        ls -lh $SYSROOT/lib/libevent*.a
+
+    - name: 编译 xfrpc
+      id: build-xfrpc
+      run: |
+        SYSROOT=/tmp/sysroot
+        mkdir -p bin && cd bin
+
+        # 构建完整的编译标志（上游有 -Werror，需加 -Wno-* 绕过假阳性）
+        COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
+        COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections"
+
+        cmake \
+          -DCMAKE_C_COMPILER=$CC \
+          -DCMAKE_C_FLAGS="$COMMON_CFLAGS $CFLAGS" \
+          -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS $LDFLAGS -Wl,--start-group" \
+          -DCMAKE_FIND_ROOT_PATH=$SYSROOT \
+          -DUSE_WOLFSSL=OFF \
+          -DLIBEVENT_INCLUDE_DIR=$SYSROOT/include \
+          -DLIBEVENT_LIB=$SYSROOT/lib/libevent.a \
+          -DLIBEVENT_CORE_LIB=$SYSROOT/lib/libevent_core.a \
+          -DLIBEVENT_PTHREADS_LIB=$SYSROOT/lib/libevent_pthreads.a \
+          -DLIBEVENT_EXTRA_LIB=$SYSROOT/lib/libevent_extra.a \
+          -DLIBEVENT_OPENSSL_LIB=$SYSROOT/lib/libevent_openssl.a \
+          -DJSON-C_INCLUDE_DIR=$SYSROOT/include \
+          -DJSON-C_LIBRARY=$SYSROOT/lib/libjson-c.a \
+          -DZLIB_INCLUDE_DIR=$SYSROOT/include \
+          -DZLIB_LIBRARY=$SYSROOT/lib/libz.a \
+          -DOPENSSL_INCLUDE_DIR=$SYSROOT/include \
+          -DOPENSSL_SSL_LIBRARY=$SYSROOT/lib/libssl.a \
+          -DOPENSSL_CRYPTO_LIBRARY=$SYSROOT/lib/libcrypto.a \
+          -DENABLE_QUIC=ON \
+          -DNGTCP2_LIB=$SYSROOT/lib/libngtcp2.a \
+          -DNGTCP2_INCLUDE_DIR=$SYSROOT/include \
+          ..
+
+        make -j$(nproc)
+        $STRIP xfrpc
+        du -m xfrpc || true
+        file xfrpc
+
+        # 记录二进制大小
+        SIZE=$(stat -c%s xfrpc 2>/dev/null || echo 0)
+        echo "SIZE_XFRPC=$SIZE" >> $GITHUB_ENV
+        echo -e "\n\033[32m✓ xfrpc 编译完成！大小: $SIZE 字节\033[0m"
+
+    - name: 输出编译摘要到 GITHUB_STEP_SUMMARY
+      run: |
+        BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+        SYSROOT=/tmp/sysroot
+        FILE_INFO=$(file bin/xfrpc | sed 's/|//g')
+
+        # 从文件直接读取库大小
+        SZ_ZLIB=$(stat -c%s $SYSROOT/lib/libz.a 2>/dev/null || echo 0)
+        SZ_OPENSSL=$(stat -c%s $SYSROOT/lib/libssl.a 2>/dev/null || echo 0)
+        SZ_NGTCP2=$(stat -c%s $SYSROOT/lib/libngtcp2.a 2>/dev/null || echo 0)
+        SZ_JSONC=$(stat -c%s $SYSROOT/lib/libjson-c.a 2>/dev/null || echo 0)
+        SZ_LIBEVENT=$(stat -c%s $SYSROOT/lib/libevent_core.a 2>/dev/null || echo 0)
+        SZ_XFRPC=$(stat -c%s bin/xfrpc 2>/dev/null || echo 0)
+
+        cat >> $GITHUB_STEP_SUMMARY << SUMMARYEOF
+        ## ✅ xfrpc 静态交叉编译完成
+
+        | 项目 | 值 |
+        |------|-----|
+        | 架构 | ${{ matrix.target }} |
+        | 编译时间 | ${BUILD_TIME} |
+        | 链接方式 | 完全静态 (musl) |
+        | 缓存命中 | ${{ steps.cache-sysroot.outputs.cache-hit }} |
+        | TLS 后端 | OpenSSL ${{ env.OPENSSL_VER }} |
+        | QUIC 传输 | ngtcp2 ${{ env.NGTCP2_VER }} |
+        | 编译优化 | \`-Os -ffunction-sections -fdata-sections -Wl,--gc-sections\` |
+        | 无用符号裁剪 | 已启用 (gc-sections) |
+        | 文件类型 | ${FILE_INFO} |
+
+        ### 静态链接库体积
+
+        | 依赖库 | 版本 | 静态库大小 |
+        |--------|------|-----------|
+        | zlib | ${{ env.ZLIB_VER }} | ${SZ_ZLIB} 字节 |
+        | OpenSSL | ${{ env.OPENSSL_VER }} | ${SZ_OPENSSL} 字节 |
+        | ngtcp2 | ${{ env.NGTCP2_VER }} | ${SZ_NGTCP2} 字节 |
+        | json-c | ${{ env.JSONC_VER }} | ${SZ_JSONC} 字节 |
+        | libevent | ${{ env.LIBEVENT_VER }} | ${SZ_LIBEVENT} 字节 |
+
+        ### 编译产物
+
+        | 文件 | 大小 | 说明 |
+        |------|------|------|
+        | \`xfrpc-${{ matrix.target }}\` | ${SZ_XFRPC} 字节 | 原始二进制，strip 后可直接运行 |
+        | \`xfrpc-${{ matrix.target }}_upx\` | （见后） | UPX 压缩版，二选一下载即可 |
+        SUMMARYEOF
+
+        # 保存到环境变量供后续步骤使用
+        echo "SIZE_XFRPC=$SZ_XFRPC" >> $GITHUB_ENV
+
+    - name: 安装 UPX
+      uses: crazy-max/ghaction-upx@v3
+      with:
+        version: v4.2.4
+        install-only: true
+
+    - name: UPX 压缩
+      run: |
+        cd bin
+        # 所有目标统一命名: xfrpc-$TARGET / xfrpc-$TARGET_upx
+        cp xfrpc xfrpc-${{ matrix.target }}_upx
+        mv xfrpc xfrpc-${{ matrix.target }}
+        upx --lzma --best xfrpc-${{ matrix.target }}_upx
+
+    - name: 追加 UPX 结果到摘要
+      run: |
+        SZ_UPX=$(stat -c%s bin/xfrpc-${{ matrix.target }}_upx 2>/dev/null || echo 0)
+        SZ_XFRPC=${SIZE_XFRPC:-0}
+        echo "| \`xfrpc-${{ matrix.target }}_upx\` | ${SZ_UPX} 字节 | UPX 压缩版，二选一下载即可 |" >> $GITHUB_STEP_SUMMARY
+        if [ "$SZ_XFRPC" -gt 0 ] && [ "$SZ_UPX" -gt 0 ]; then
+          COMPRESS_RATE=$(( (SZ_XFRPC - SZ_UPX) * 100 / SZ_XFRPC ))
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 原始: ${SZ_XFRPC} 字节 → **UPX: ${SZ_UPX} 字节**（压缩率 **${COMPRESS_RATE}%**）" >> $GITHUB_STEP_SUMMARY
+          echo "> 两者功能完全相同，二选一即可。UPX 版首次运行时会自动解压。" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "> 🤖 由 GitHub Actions 自动编译 | 源码: liudf0716/xfrpc@${{ env.branch }}" >> $GITHUB_STEP_SUMMARY
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: xfrpc-${{ env.branch }}-${{ matrix.target }}
+        path: bin/*
+
+    - name: 打包 (准备 Release)
+      if: github.event.inputs.rel == 'true'
+      shell: bash
+      run: |
+        echo "build_time=$(date '+%Y年%m月%d日%H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
+        if [ -z "$TAG" ]; then
+          echo "tag=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        fi
+        echo "haxi=$(git rev-parse HEAD)" >> $GITHUB_ENV
+      env:
+        TAG: ${{ env.tag }}
+        TARGET: ${{ matrix.target }}
+
+    - name: 发布 Release
+      if: github.event.inputs.rel == 'true'
+      uses: lmq8267/action-gh-release@master
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        body: |
+         > ### ![](https://img.shields.io/badge/%E7%BC%96%E8%AF%91%E6%97%B6%E9%97%B4-${{ env.build_time }}-8267?logo=github&labelColor=%E9%A1%BB)![](https://img.shields.io/github/downloads/${{ github.repository }}/${{env.tag}}/total?label=%E4%B8%8B%E8%BD%BD%E6%AC%A1%E6%95%B0&logo=github)
+
+         ### 依赖库版本
+
+         | 依赖库 | 版本 |
+         |--------|------|
+         | zlib | ${{ env.ZLIB_VER }} |
+         | OpenSSL | ${{ env.OPENSSL_VER }} |
+         | ngtcp2 | ${{ env.NGTCP2_VER }} |
+         | json-c | ${{ env.JSONC_VER }} |
+         | libevent | ${{ env.LIBEVENT_VER }} |
+
+         ### 构建信息
+
+         - **架构**: ${{ matrix.target }}
+         - **链接方式**: 完全静态 (musl)
+         - **TLS 后端**: OpenSSL ${{ env.OPENSSL_VER }}
+         - **QUIC 传输**: ngtcp2 ${{ env.NGTCP2_VER }}
+         - **编译优化**: \`-Os -ffunction-sections -fdata-sections -Wl,--gc-sections\`
+
+         ### 编译产物
+
+         本 Release 包含两个版本的可执行文件：
+
+         | 文件 | 说明 |
+         |------|------|
+         | \`xfrpc-${{ matrix.target }}\` | 原始编译二进制（strip 后），可直接运行 |
+         | \`xfrpc-${{ matrix.target }}_upx\` | UPX --lzma --best 压缩版，体积更小 |
+
+         > 两者功能完全相同，**二选一下载即可**。UPX 版首次运行时会自动解压。
+         > 下载后请先执行 \`chmod +x xfrpc-*\` 赋予执行权限。
+
+         [提交记录](https://github.com/liudf0716/xfrpc/tree/${{ env.haxi }})
+
+         > 🤖 由 GitHub Actions 自动编译 | [源码](https://github.com/liudf0716/xfrpc): liudf0716/xfrpc@${{ env.branch }}
+
+        tag_name: ${{env.tag}}
+        files: |
+          bin/xfrpc-${{ matrix.target }}*
+
+  del:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 删除旧的流程记录
+      if: github.event.inputs.del == 'true'
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        retain_days: 0
+        keep_minimum_runs: 0
