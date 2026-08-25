@@ -1,0 +1,61 @@
+name: xfrpc-mipsel
+
+on:
+  # Only manual trigger from Actions tab
+  workflow_dispatch:
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: prepare build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libjson-c-dev libevent-dev libssl-dev gcc-14 g++-14
+
+    - name: Install MIPS cross-compiler
+      run: |
+        mkdir temp
+        cd temp
+        wget https://github.com/themactep/thingino-firmware/releases/download/toolchain-x86_64/thingino-toolchain-x86_64_xburst1_4_4_musl_gcc14-linux-mipsel.tar.gz
+        tar -xzf thingino-toolchain-x86_64_xburst1_4_4_musl_gcc14-linux-mipsel.tar.gz
+        mv mipsel-thingino-linux-musl_sdk-buildroot /tmp/
+        ls -ltr /tmp/mipsel-thingino-linux-musl_sdk-buildroot/
+        /tmp/mipsel-thingino-linux-musl_sdk-buildroot/relocate-sdk.sh
+        echo "/tmp/mipsel-thingino-linux-musl_sdk-buildroot/bin" >> $GITHUB_PATH
+        echo "TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot" >> $GITHUB_ENV
+        echo "PATH=${TOOLCHAIN_DIR}/bin:$PATH" >> $GITHUB_ENV
+        cd ../
+        rm -rf temp
+
+    - name: compile xfrpc
+      env:
+        CC: gcc-14
+        CXX: g++-14
+      run: |
+        mkdir build
+        cd build
+
+        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
+        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
+        c_compiler=mipsel-thingino-linux-musl-gcc
+        cpp_compiler=mipsel-thingino-linux-musl-g++
+        cmake -DCMAKE_CXX_COMPILER=${cpp_compiler} -DCMAKE_C_COMPILER=${c_compiler} ..
+        make
+        ls -ltr
+
+    - name: Upload build artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: xfrpc-mipsel
+        path: build/*
+        retention-days: 7
+    

@@ -1,4 +1,4 @@
-name: compile xfrpc in ubuntu-latest 
+name: xfrpc-x86_64
 
 on:
   # Only manual trigger from Actions tab
@@ -35,7 +35,7 @@ jobs:
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: build-x86_64
+        name: xfrpc-x86_64
         path: build/*
         retention-days: 7
     
