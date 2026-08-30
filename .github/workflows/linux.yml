@@ -217,7 +217,9 @@ jobs:
           make -j$(nproc)
           make install_sw
           cd ..
+          echo -e "\n\033[32m✓ OpenSSL ----------x---------\033[0m"
           echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
+          echo -e "\n\033[32m✓ OpenSSL ----------0---------\033[0m"
           ls -ltr /home/runner/work/_temp/
           echo -e "\n\033[32m✓ OpenSSL ----------1---------\033[0m"
           cat /home/runner/work/_temp/*.sh
