@@ -28,16 +28,10 @@
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
-#ifdef USE_NGTCP2_WOLFSSL
-#include <wolfssl/options.h>
-#include <wolfssl/ssl.h>
-#include <ngtcp2/ngtcp2_crypto_wolfssl.h>
-#else
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <ngtcp2/ngtcp2_crypto_ossl.h>
-#endif
 
 #include "quic_transport.h"
 #include "debug.h"
@@ -611,22 +605,20 @@ static SSL_CTX *quic_create_ssl_ctx(const struct quic_config *config)
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
 	}
 
-#ifdef USE_NGTCP2_WOLFSSL
-	/* wolfSSL: configure QUIC on the context */
+	/* Configure QUIC on the OpenSSL context */
 	if (config->is_server) {
-		if (ngtcp2_crypto_wolfssl_configure_server_context(ctx) != 0) {
-			debug(LOG_ERR, "QUIC: wolfSSL configure server context failed");
+		if (ngtcp2_crypto_ossl_configure_server_context(ctx) != 0) {
+			debug(LOG_ERR, "QUIC: OpenSSL configure server context failed");
 			SSL_CTX_free(ctx);
 			return NULL;
 		}
 	} else {
-		if (ngtcp2_crypto_wolfssl_configure_client_context(ctx) != 0) {
-			debug(LOG_ERR, "QUIC: wolfSSL configure client context failed");
+		if (ngtcp2_crypto_ossl_configure_client_context(ctx) != 0) {
+			debug(LOG_ERR, "QUIC: OpenSSL configure client context failed");
 			SSL_CTX_free(ctx);
 			return NULL;
 		}
 	}
-#endif
 
 	return ctx;
 }
@@ -638,12 +630,10 @@ static SSL *quic_create_ssl(SSL_CTX *ctx, const struct quic_config *config)
 		return NULL;
 
 	/* Set transport as QUIC */
-#ifdef USE_NGTCP2_OSSL
 	if (config->is_server)
 		ngtcp2_crypto_ossl_configure_server_session(ssl);
 	else
 		ngtcp2_crypto_ossl_configure_client_session(ssl);
-#endif
 
 	if (!config->is_server) {
 		SSL_set_connect_state(ssl);

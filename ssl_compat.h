@@ -3,14 +3,10 @@
  * SSL/TLS compatibility header.
  *
  * Always includes real OpenSSL headers for crypto (EVP, RAND, MD5) and
- * TLS (SSL) APIs.  wolfSSL's OpenSSL-compat layer is incomplete — it
- * lacks EVP_aes_128_cfb128 and other ciphers required by frp's protocol.
- *
- * libevent's bufferevent_openssl_socket_new also requires real OpenSSL's
- * struct ssl_st, so tls.c uses real OpenSSL directly.
- *
- * Files that need only wolfSSL for a specific purpose should include
- * wolfssl/options.h and wolfssl/openssl/ssl.h directly.
+ * TLS (SSL) APIs.  OpenSSL is the only TLS backend of this project:
+ * libevent's bufferevent_openssl_socket_new requires real OpenSSL's
+ * struct ssl_st, and the crypto layer (PBKDF2, AES-128-CFB, MD5) uses
+ * the OpenSSL EVP interface.
  */
 
 #ifndef XFRPC_SSL_COMPAT_H

@@ -26,21 +26,15 @@
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
-#ifdef USE_NGTCP2_WOLFSSL
-#include <wolfssl/options.h>
-#include <wolfssl/ssl.h>
-#include <ngtcp2/ngtcp2_crypto_wolfssl.h>
-#else
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <ngtcp2/ngtcp2_crypto_ossl.h>
-#endif
 
 #include "quic_client_transport.h"
 #include "debug.h"
 
-/* Getter functions from tls.c — avoids config.h -> tcpmux.h DATA conflict with wolfSSL */
+/* Getter functions from tls.c — avoids config.h -> tcpmux.h DATA conflict with OpenSSL */
 extern char *tls_get_ca_file(void);
 extern char *tls_get_cert_file(void);
 extern char *tls_get_key_file(void);
@@ -185,7 +179,7 @@ static int qc_recv_crypto(ngtcp2_conn *conn, ngtcp2_encryption_level level,
 
 	/*
 	 * BUG FIX: quic-go sends post-handshake TLS data (NewSessionTicket)
-	 * as 1RTT CRYPTO frames. We must still pass these to wolfSSL for
+	 * as 1RTT CRYPTO frames. We must still pass these to OpenSSL for
 	 * proper TLS processing. But we also need to ensure stream 0 is
 	 * opened ASAP so that STREAM frames (LoginResp etc.) from the
 	 * server can be delivered via recv_stream_data.
@@ -626,18 +620,9 @@ int quic_connect_to_server(struct event_base *base,
 	debug(LOG_INFO, "QUIC client: UDP -> %s:%d", server_addr, port);
 
 	/* TLS */
-#ifdef USE_NGTCP2_WOLFSSL
-	qc->ssl_ctx = SSL_CTX_new(wolfTLSv1_3_client_method());
-	if (!qc->ssl_ctx) goto fail;
-	if (ngtcp2_crypto_wolfssl_configure_client_context(qc->ssl_ctx) != 0) {
-		debug(LOG_ERR, "QUIC client: wolfssl configure failed");
-		goto fail;
-	}
-#else
 	qc->ssl_ctx = SSL_CTX_new(TLS_client_method());
-	SSL_CTX_set_min_proto_version(qc->ssl_ctx, TLS1_3_VERSION);
-#endif
 	if (!qc->ssl_ctx) goto fail;
+	SSL_CTX_set_min_proto_version(qc->ssl_ctx, TLS1_3_VERSION);
 
 	/* Load TLS certificates from config (for mTLS support).
 	 * Must use the same SSL API as the SSL_CTX was created with. */
@@ -703,12 +688,8 @@ int quic_connect_to_server(struct event_base *base,
 
 	qc->conn_ref.get_conn = qc_get_conn;
 	qc->conn_ref.user_data = qc;
-#ifdef USE_NGTCP2_WOLFSSL
-	wolfSSL_set_app_data(qc->ssl, &qc->conn_ref);
-#elif defined(USE_NGTCP2_OSSL)
 	ngtcp2_crypto_ossl_configure_client_session(qc->ssl);
 	SSL_set_app_data(qc->ssl, &qc->conn_ref);
-#endif
 
         /* events */
         qc->base = base;

@@ -41,7 +41,7 @@ the following table is detail  compatible feature:
 
 ### Build on Ubuntu 20.04.3 LTS
 
-xfrpc requires libevent, json-c, and a TLS library (wolfSSL or OpenSSL).
+xfrpc requires libevent, json-c, and OpenSSL.
 
 **Install dependencies on Ubuntu/Debian:**
 
@@ -52,7 +52,7 @@ sudo apt-get install -y libjson-c-dev libevent-dev libssl-dev
 
 **Install dependencies on OpenWrt:**
 
-wolfSSL is the default TLS library on OpenWrt and is recommended. No additional TLS package is needed for basic functionality.
+Install the OpenSSL and libevent packages (`libopenssl`, `libevent2`).
 
 **Build:**
 
@@ -68,7 +68,6 @@ make
 
 | Option | Default | Description |
 |---|---|---|
-| `-DUSE_WOLFSSL=ON` | ON | Use wolfSSL as TLS backend (falls back to OpenSSL if not found) |
 | `-DENABLE_QUIC=ON` | OFF | Enable QUIC transport via ngtcp2 (requires ngtcp2 + nghttp3) |
 | `-DDEBUG=ON` | OFF | Enable debug build with address sanitizer |
 
@@ -79,27 +78,11 @@ cmake .. -DENABLE_QUIC=ON
 make
 ```
 
-**Build with OpenSSL instead of wolfSSL:**
-
-```
-cmake .. -DUSE_WOLFSSL=OFF
-make
-```
 This will compile xfrpc and create an executable in the build directory. You can then run xfrpc using the executable by running the appropriate command in terminal.
 
 ### TLS Backend
 
-xfrpc uses **wolfSSL** as the default TLS backend, which is the standard TLS library on OpenWrt. wolfSSL is smaller, faster, and has native QUIC support compared to OpenSSL.
-
-On systems where wolfSSL is not installed, xfrpc automatically falls back to OpenSSL. You can explicitly choose the backend:
-
-```
-# Use wolfSSL (default, recommended)
-cmake .. -DUSE_WOLFSSL=ON
-
-# Use OpenSSL
-cmake .. -DUSE_WOLFSSL=OFF
-```
+xfrpc uses **OpenSSL** as its TLS backend: the TLS transport (via libevent `bufferevent_openssl`) and the crypto layer (PBKDF2, AES-128-CFB, MD5) both use the OpenSSL API.
 
 ### Build static binary in Alpine container
 

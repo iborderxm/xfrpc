@@ -16,18 +16,18 @@
 
 | 依赖 | 用途 |
 |------|------|
-| libevent | 事件循环 + `bufferevent_openssl`（TLS 传输硬依赖，即使 wolfSSL 模式也需 OpenSSL 链接） |
+| libevent | 事件循环 + `bufferevent_openssl`（TLS 传输硬依赖） |
 | json-c | 控制消息 JSON 解析 |
 | zlib | 压缩 |
-| wolfSSL（默认）或 OpenSSL | TLS 后端 |
-| ngtcp2 + nghttp3（可选） | QUIC 传输（xtcp P2P） |
+| OpenSSL | TLS 后端（TLS 传输 + crypto 层 EVP 接口，必需依赖） |
+| ngtcp2 + nghttp3（可选） | QUIC 传输（xtcp P2P，crypto 后端固定 OpenSSL） |
 | 内置 vendor | `vendor/snappy/`（压缩）、`vendor/tomlc17/`（TOML 解析） |
 
 ### 2.2 构建命令
 
 ```bash
 mkdir build && cd build
-cmake ..            # 默认 USE_WOLFSSL=ON, ENABLE_QUIC=OFF
+cmake ..            # 默认 ENABLE_QUIC=OFF
 make
 ```
 
@@ -35,15 +35,14 @@ make
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `-DUSE_WOLFSSL=ON` | ON | wolfSSL 为默认 TLS 后端；`crypto.c` 用 wolfSSL 做 PBKDF2/AES，`tls.c` 仍用真实 OpenSSL（libevent bufferevent 兼容），两者共存链接 |
-| `-DENABLE_QUIC=ON` | OFF | 启用 ngtcp2 QUIC，自动探测 crypto 后端（wolfssl → ossl） |
+| `-DENABLE_QUIC=ON` | OFF | 启用 ngtcp2 QUIC，crypto 后端固定 OpenSSL（ossl） |
 | `-DDEBUG=ON` | OFF | `-g -O0` 并定义 `XFRPC_DEBUG` |
 | `-DENABLE_SANITIZER=ON` | ON | Debug 模式下启用 ASan/LSan |
 
 **关键编译约束**：
 - `-Wall -Werror` 全局开启（CI 中用 `-Wno-error=array-bounds` 规避误报）
 - `-Wno-stringop-truncation` 针对遗留 `strncpy` 代码
-- TLS 后端架构：`tls.c` 走 OpenSSL API（libevent `bufferevent_openssl`），`crypto.c` 走 wolfSSL API（`USE_WOLFSSL` 宏），见 `ssl_compat.h`
+- TLS 后端架构：`tls.c`（TLS 传输）与 `crypto.c`（加密原语）统一走 OpenSSL API，见 `ssl_compat.h`
 
 ## 3. 代码架构
 
@@ -72,7 +71,7 @@ main.c::main
 | **XTCP P2P** | `xtcp_client.c`、`xtcp_visitor.c`、`nathole.c` | NAT 打洞 + P2P 访客 |
 | **STCP 访客** | `visitor.c` | stcp/xtcp 访客端连接 |
 | **QUIC** | `quic_transport.c`（可选编译）、`quic_client_transport.c`（恒编译，带 `#ifdef HAVE_NGTCP2` 桩） | QUIC 传输层 |
-| **加密/流** | `crypto.c`、`crypto_stream.c`、`zip.c` | PBKDF2/AES（wolfSSL）、流加密、snappy 压缩、zip |
+| **加密/流** | `crypto.c`、`crypto_stream.c`、`zip.c` | PBKDF2/AES（OpenSSL EVP）、流加密、snappy 压缩、zip |
 | **TLS 隧道** | `tls.c`、`ssl_compat.h` | TLS-over-TCP 传输（libevent + OpenSSL） |
 | **辅助** | `utils.c`、`common.c`、`debug.c`、`health_check.c`、`oidc_auth.c`、`mongoose.c`（嵌入式 HTTP） | 工具函数、健康检查、OIDC 认证 |
 | **SOCKS5/xdpi** | `client.c/h` | SOCKS5 代理状态机、协议 DPI 识别（MSTSC/RDP/VNC/SSH 等） |
@@ -108,13 +107,13 @@ main.c::main
 | 新增代理类型 | `proxy.c`（注册）+ 新建 `proxy_xxx.c` + `msg.h` 消息类型 |
 | 修改协议消息 | `msg.h`（enum）+ `msg.c`（编解码）|
 | 新增配置项 | `config.c`（INI/TOML 双路径都要处理）+ `xfrpc_full.toml` 文档 |
-| TLS 相关改动 | `tls.c`（OpenSSL 路径）与 `crypto.c`（wolfSSL 路径）分开验证 |
+| TLS 相关改动 | `tls.c`（TLS 传输）与 `crypto.c`（加密原语）统一走 OpenSSL，改动后分别验证 TLS 握手与加密流 |
 | QUIC 改动 | `quic_transport.c`（需 `-DENABLE_QUIC=ON`）+ CI 中 ngtcp2 编译参数 |
-| 交叉编译调试 | 参考 `.github/workflows/linux.yml` 的 sysroot 构建流程（zlib→wolfSSL/OpenSSL→ngtcp2→json-c→libevent） |
+| 交叉编译调试 | 参考 `.github/workflows/linux.yml` 的 sysroot 构建流程（zlib→OpenSSL→ngtcp2→json-c→libevent） |
 
 ## 7. 分析注意事项
 
 1. **平台差异**：代码假定 POSIX/Linux，Windows 下仅能做静态分析（如本仓库在 Windows 上分析时，无法本地运行 cmake 构建）
-2. **双 TLS 栈共存**是本项目最大的特殊性——阅读 SSL 相关代码前先确认 `USE_WOLFSSL` 宏作用域
+2. **TLS 后端为 OpenSSL 单栈**——`ssl_compat.h` 统一引入 OpenSSL 头，TLS 传输与加密原语均基于 OpenSSL API，勿引入其他 TLS 库
 3. `mongoose.c`、`uthash.h`、`ini.c` 为第三方嵌入式库，通常无需修改
 4. 消息协议必须与 frp 服务端保持二进制兼容，改动 `msg.c/h` 前先对照 frp 上游实现

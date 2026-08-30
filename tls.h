@@ -52,8 +52,8 @@ void tls_log_errors(const char *context);
 
 /**
  * Load TLS certificates from config into an SSL_CTX.
- * Uses void* to avoid type conflicts between OpenSSL and wolfSSL headers.
- * The actual type is SSL_CTX* (OpenSSL) or WOLFSSL_CTX* (wolfSSL).
+ * Uses void* to avoid pulling OpenSSL headers into every includer.
+ * The actual type is SSL_CTX* (OpenSSL).
  *
  * @param ctx  The SSL_CTX to configure (passed as void* for compatibility)
  * @return 0 on success, -1 on failure

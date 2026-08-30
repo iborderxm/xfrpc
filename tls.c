@@ -277,7 +277,7 @@ void tls_cleanup(void)
 /**
  * Load TLS certificates from config into an external SSL_CTX.
  * This is used by the QUIC transport which creates its own SSL_CTX.
- * Uses void* to avoid type conflicts between OpenSSL and wolfSSL.
+ * Uses void* to avoid pulling OpenSSL headers into every includer.
  *
  * @param ctx  The SSL_CTX to configure with certs from common_conf (as void*)
  * @return 0 on success, -1 on fatal failure
