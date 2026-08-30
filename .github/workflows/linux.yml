@@ -218,8 +218,13 @@ jobs:
           make install_sw
           cd ..
           echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
-          ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
+          ls -ltr /home/runner/work/_temp/
           echo -e "\n\033[32m✓ OpenSSL ----------1---------\033[0m"
+          cat /home/runner/work/_temp/*.sh
+          echo -e "\n\033[32m✓ OpenSSL ----------2---------\033[0m"
+          ls -ltr $SYSROOT/lib/
+          # ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
+          echo -e "\n\033[32m✓ OpenSSL ----------3---------\033[0m"
         else
           echo -e "\n\033[32m✓ OpenSSL 无需编译\033[0m"
 
