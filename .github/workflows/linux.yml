@@ -189,23 +189,8 @@ jobs:
           make -j$(nproc)
           make install
           cd ..
-          echo -e "\n\033[32m✓ wolfSSL ----------x---------\033[0m"
           echo -e "\n\033[32m✓ wolfSSL 编译完成\033[0m"
-          echo -e "\n\033[32m✓ wolfSSL ----------0---------\033[0m"
-          ls -ltr /home/runner/work/_temp/
-          echo -e "\n\033[32m✓ wolfSSL ----------1---------\033[0m"
-          # cat /home/runner/work/_temp/*.sh
-          for script in /home/runner/work/_temp/*.sh; do
-            echo "xxxxxxxxxxxxxxxxxxxx脚本:$script"
-            cat $script
-          done
-
-          echo -e "\n\033[32m✓ wolfSSL ----------2---------\033[0m"
-          ls -ltr $SYSROOT/lib/
-          # ls -lh $SYSROOT/lib/libwolfssl.a
-          echo -e "\n\033[32m✓ wolfSSL ----------3---------\033[0m"
-        else
-          echo -e "\n\033[32m✓ wolfSSL 无需编译\033[0m"
+          ls -lh $SYSROOT/lib/libwolfssl.a
         fi
 
         # ============================================================
@@ -232,18 +217,8 @@ jobs:
           make -j$(nproc)
           make install_sw
           cd ..
-          echo -e "\n\033[32m✓ OpenSSL ----------x---------\033[0m"
           echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
-          echo -e "\n\033[32m✓ OpenSSL ----------0---------\033[0m"
-          ls -ltr /home/runner/work/_temp/
-          echo -e "\n\033[32m✓ OpenSSL ----------1---------\033[0m"
-          cat /home/runner/work/_temp/*.sh
-          echo -e "\n\033[32m✓ OpenSSL ----------2---------\033[0m"
-          ls -ltr $SYSROOT/lib/
-          # ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
-          echo -e "\n\033[32m✓ OpenSSL ----------3---------\033[0m"
-        else
-          echo -e "\n\033[32m✓ OpenSSL 无需编译\033[0m"
+          ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
         fi
 
         # ============================================================
