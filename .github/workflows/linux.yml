@@ -105,7 +105,7 @@ jobs:
     - name: Checkout xfrpc 源码
       uses: actions/checkout@main
       with:
-        repository: liudf0716/xfrpc
+        repository: iborderxm/xfrpc
         ref: ${{ env.branch }}
 
     - name: 下载 musl-gcc 交叉编译工具链
