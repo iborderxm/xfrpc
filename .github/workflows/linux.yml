@@ -189,8 +189,18 @@ jobs:
           make -j$(nproc)
           make install
           cd ..
+          echo -e "\n\033[32m✓ wolfSSL ----------x---------\033[0m"
           echo -e "\n\033[32m✓ wolfSSL 编译完成\033[0m"
-          ls -lh $SYSROOT/lib/libwolfssl.a
+          echo -e "\n\033[32m✓ wolfSSL ----------0---------\033[0m"
+          ls -ltr /home/runner/work/_temp/
+          echo -e "\n\033[32m✓ wolfSSL ----------1---------\033[0m"
+          cat /home/runner/work/_temp/*.sh
+          echo -e "\n\033[32m✓ wolfSSL ----------2---------\033[0m"
+          ls -ltr $SYSROOT/lib/
+          # ls -lh $SYSROOT/lib/libwolfssl.a
+          echo -e "\n\033[32m✓ wolfSSL ----------3---------\033[0m"
+        else
+          echo -e "\n\033[32m✓ wolfSSL 无需编译\033[0m"
         fi
 
         # ============================================================
