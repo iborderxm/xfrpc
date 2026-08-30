@@ -194,7 +194,12 @@ jobs:
           echo -e "\n\033[32m✓ wolfSSL ----------0---------\033[0m"
           ls -ltr /home/runner/work/_temp/
           echo -e "\n\033[32m✓ wolfSSL ----------1---------\033[0m"
-          cat /home/runner/work/_temp/*.sh
+          # cat /home/runner/work/_temp/*.sh
+          for script in /home/runner/work/_temp/*.sh; do
+            echo "xxxxxxxxxxxxxxxxxxxx脚本:$script"
+            cat $script
+          done
+
           echo -e "\n\033[32m✓ wolfSSL ----------2---------\033[0m"
           ls -ltr $SYSROOT/lib/
           # ls -lh $SYSROOT/lib/libwolfssl.a
