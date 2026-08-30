@@ -219,6 +219,9 @@ jobs:
           cd ..
           echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
           ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
+          echo -e "\n\033[32m✓ OpenSSL ----------1---------\033[0m"
+        else
+          echo -e "\n\033[32m✓ OpenSSL 无需编译\033[0m"
 
         # ============================================================
         # 3. 编译 ngtcp2 ${{ env.NGTCP2_VER }} — QUIC 传输层
