@@ -186,7 +186,7 @@ set(SYSTEM_LIBS
 set(EXTERNAL_LIBS
     ${SSL_LIBRARIES}
     event
-    event_openssl
+    # event_openssl
     ${JSON-C_LIBRARIES}
     ${ZLIB_LIBRARIES}
 )

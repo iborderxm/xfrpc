@@ -198,26 +198,27 @@ jobs:
         #    xfrpc tls.c 经 libevent 使用真实 OpenSSL（CMakeLists 硬编码 event_openssl），
         #    故 OpenSSL 始终编译；wolfSSL 模式下 wolfSSL(QUIC+PBKDF2) 与 OpenSSL 共存
         # ============================================================
-        echo -e "\n\n\n\033[36m===== [2/5] 编译 OpenSSL =====\033[0m"
-        mkdir openssl-src && \
-          curl -sL https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VER }}/openssl-${{ env.OPENSSL_VER }}.tar.gz | \
-          tar xz -C openssl-src --strip-components=1
-        cd openssl-src
-        # CC 环境变量指向交叉编译器，Configure 会自动使用
-        # ARCH_FLAG 来自矩阵 (linux-aarch64, linux-x86_64, mingw64 等)
-        CC=$CC ./Configure ${{ matrix.ARCH_FLAG }} \
-          --prefix=$SYSROOT \
-          --openssldir=$SYSROOT/ssl \
-          --libdir=lib \
-          no-shared no-tests no-apps no-docs no-legacy \
-          enable-threads enable-quic \
-          no-comp no-ssl2 no-ssl3 no-weak-ssl-ciphers \
-          -fPIC
-        make -j$(nproc)
-        make install_sw
-        cd ..
-        echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
-        ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
+        if [ "${{ env.wolfssl }}" = "false" ]; then
+          echo -e "\n\n\n\033[36m===== [2/5] 编译 OpenSSL =====\033[0m"
+          mkdir openssl-src && \
+            curl -sL https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VER }}/openssl-${{ env.OPENSSL_VER }}.tar.gz | \
+            tar xz -C openssl-src --strip-components=1
+          cd openssl-src
+          # CC 环境变量指向交叉编译器，Configure 会自动使用
+          # ARCH_FLAG 来自矩阵 (linux-aarch64, linux-x86_64, mingw64 等)
+          CC=$CC ./Configure ${{ matrix.ARCH_FLAG }} \
+            --prefix=$SYSROOT \
+            --openssldir=$SYSROOT/ssl \
+            --libdir=lib \
+            no-shared no-tests no-apps no-docs no-legacy \
+            enable-threads enable-quic \
+            no-comp no-ssl2 no-ssl3 no-weak-ssl-ciphers \
+            -fPIC
+          make -j$(nproc)
+          make install_sw
+          cd ..
+          echo -e "\n\033[32m✓ OpenSSL 编译完成\033[0m"
+          ls -lh $SYSROOT/lib/libssl.a $SYSROOT/lib/libcrypto.a
 
         # ============================================================
         # 3. 编译 ngtcp2 ${{ env.NGTCP2_VER }} — QUIC 传输层
@@ -349,7 +350,7 @@ jobs:
           -DOPENSSL_INCLUDE_DIR=$SYSROOT/include \
           -DOPENSSL_SSL_LIBRARY=$SYSROOT/lib/libssl.a \
           -DOPENSSL_CRYPTO_LIBRARY=$SYSROOT/lib/libcrypto.a \
-          -DENABLE_QUIC=ON \
+          -DENABLE_QUIC=OFF \
           -DNGTCP2_LIB=$SYSROOT/lib/libngtcp2.a \
           -DNGTCP2_INCLUDE_DIR=$SYSROOT/include \
           ..
