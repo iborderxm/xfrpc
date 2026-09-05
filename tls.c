@@ -200,19 +200,22 @@ int tls_init(void)
 		      conf->tls_cert_file);
 
 		if (conf->tls_key_file) {
-			ret = mbedtls_pk_parse_key_file(&g_cli_key,
-			                                conf->tls_key_file,
-			                                NULL, 0,
-			                                xfrpc_random, NULL);
+			/* 3.6.x 原型：parse_keyfile(ctx, path, password(NUL 结尾),
+			 * f_rng, p_rng)；password 为 NULL 表示无密码，无 pwdlen 参数 */
+			ret = mbedtls_pk_parse_keyfile(&g_cli_key,
+			                               conf->tls_key_file,
+			                               NULL,
+			                               xfrpc_random, NULL);
 			if (ret != 0) {
 				debug(LOG_ERR, "[TLS] Failed to load private key: %s",
 				      conf->tls_key_file);
-				tls_log_error("mbedtls_pk_parse_key_file", ret);
+				tls_log_error("mbedtls_pk_parse_keyfile", ret);
 				goto fail;
 			}
 
-			/* 校验私钥与证书匹配 */
-			ret = mbedtls_pk_check_pair(&g_cli_crt.pk, &g_cli_key);
+			/* 校验私钥与证书匹配（3.6.x 需传入 f_rng/p_rng） */
+			ret = mbedtls_pk_check_pair(&g_cli_crt.pk, &g_cli_key,
+			                            xfrpc_random, NULL);
 			if (ret != 0) {
 				debug(LOG_ERR, "[TLS] Private key does not match certificate");
 				tls_log_error("mbedtls_pk_check_pair", ret);
