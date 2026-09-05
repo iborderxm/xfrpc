@@ -112,7 +112,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: /tmp/sysroot
-        key: xfrpc-sysroot-${{ matrix.target }}-${{ hashFiles('.github/workflows/xfrpc.yml') }}
+        key: xfrpc-sysroot-${{ matrix.target }}-dyn-zlib-mbedtls-${{ hashFiles('.github/workflows/linux.yml') }}
         restore-keys: |
           xfrpc-sysroot-${{ matrix.target }}
 
@@ -134,24 +134,27 @@ jobs:
 
         # ============================================================
         # 1. 编译 zlib 1.3.1 — 压缩库
+        #    默认同时构建静态+动态库；xfrpc 最终链接动态 libz.so，
+        #    -fPIC 为动态库所必需。
         # ============================================================
         echo -e "\n\033[36m===== [1/4] 编译 zlib =====\033[0m"
         mkdir zlib-src && \
           curl -sL https://github.com/madler/zlib/archive/refs/tags/v${{ env.ZLIB_VER }}.tar.gz | \
           tar xz -C zlib-src --strip-components=1
         cd zlib-src
-        CC=$CC AR=$AR RANLIB=$RANLIB \
-          ./configure --prefix=$SYSROOT --static --libdir=$SYSROOT/lib --includedir=$SYSROOT/include
+        CC=$CC AR=$AR RANLIB=$RANLIB CFLAGS="$COMMON_CFLAGS -fPIC" \
+          ./configure --prefix=$SYSROOT --libdir=$SYSROOT/lib --includedir=$SYSROOT/include
         make -j$(nproc)
         make install
         cd ..
-        echo -e "\n\033[32m✓ zlib 编译完成\033[0m"
-        ls -lh $SYSROOT/lib/libz.a
+        echo -e "\n\033[32m✓ zlib 编译完成（静态 + 动态）\033[0m"
+        ls -lh $SYSROOT/lib/libz.a $SYSROOT/lib/libz.so*
 
         # ============================================================
         # 2. 编译 mbedTLS ${{ env.MBEDTLS_VER }} — TLS 后端 + 加密原语
         #    xfrpc tls.c 经 libevent bufferevent_mbedtls 使用 mbedTLS，
         #    crypto 层使用 PBKDF2/AES-128-CFB/MD5/CTR_DRBG。
+        #    同时构建静态(.a，供 libevent 编译)与动态(.so，供 xfrpc 链接)。
         # ============================================================
         echo -e "\n\n\n\033[36m===== [2/4] 编译 mbedTLS =====\033[0m"
         mkdir mbedtls-src && \
@@ -165,7 +168,7 @@ jobs:
           -DCMAKE_INSTALL_INCLUDEDIR=include \
           -DBUILD_SHARED_LIBS=OFF \
           -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
-          -DUSE_SHARED_MBEDTLS_LIBRARY=OFF -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+          -DUSE_SHARED_MBEDTLS_LIBRARY=ON -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
           -DMBEDTLS_FATAL_WARNINGS=OFF \
           -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
           -DCMAKE_FIND_ROOT_PATH=$SYSROOT \
@@ -174,8 +177,8 @@ jobs:
         cmake --build build -j$(nproc)
         cmake --install build
         cd ..
-        echo -e "\n\033[32m✓ mbedTLS 编译完成\033[0m"
-        ls -lh $SYSROOT/lib/libmbedtls.a $SYSROOT/lib/libmbedx509.a $SYSROOT/lib/libmbedcrypto.a
+        echo -e "\n\033[32m✓ mbedTLS 编译完成（静态 + 动态）\033[0m"
+        ls -lh $SYSROOT/lib/libmbed*.a $SYSROOT/lib/libmbed*.so*
 
         # ============================================================
         # 3. 编译 json-c ${{ env.JSONC_VER }} — JSON 解析库
@@ -243,8 +246,9 @@ jobs:
         mkdir -p bin && cd bin
 
         # 构建完整的编译标志（上游有 -Werror，需加 -Wno-* 绕过假阳性）
+        # zlib / mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
         COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
-        COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections"
+        COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections -Wl,-rpath,\$ORIGIN"
 
         cmake \
           -DCMAKE_C_COMPILER=$CC \
@@ -260,11 +264,11 @@ jobs:
           -DJSON-C_INCLUDE_DIR=$SYSROOT/include \
           -DJSON-C_LIBRARY=$SYSROOT/lib/libjson-c.a \
           -DZLIB_INCLUDE_DIR=$SYSROOT/include \
-          -DZLIB_LIBRARY=$SYSROOT/lib/libz.a \
+          -DZLIB_LIBRARY=$SYSROOT/lib/libz.so \
           -DMBEDTLS_INCLUDE_DIR=$SYSROOT/include \
-          -DMBEDTLS_LIBRARY=$SYSROOT/lib/libmbedtls.a \
-          -DMBEDX509_LIBRARY=$SYSROOT/lib/libmbedx509.a \
-          -DMBEDCRYPTO_LIBRARY=$SYSROOT/lib/libmbedcrypto.a \
+          -DMBEDTLS_LIBRARY=$SYSROOT/lib/libmbedtls.so \
+          -DMBEDX509_LIBRARY=$SYSROOT/lib/libmbedx509.so \
+          -DMBEDCRYPTO_LIBRARY=$SYSROOT/lib/libmbedcrypto.so \
           ..
 
         make -j$(nproc)
@@ -300,7 +304,7 @@ jobs:
         |------|-----|
         | 架构 | ${{ matrix.target }} |
         | 编译时间 | ${BUILD_TIME} |
-        | 链接方式 | 完全静态 (musl) |
+        | 链接方式 | musl：zlib/mbedTLS 动态，json-c/libevent 静态 |
         | 缓存命中 | ${{ steps.cache-sysroot.outputs.cache-hit }} |
         | TLS/加密后端 | mbedTLS ${{ env.MBEDTLS_VER }} |
         | libevent | ${{ env.LIBEVENT_VER }} (event_mbedtls) |
@@ -308,21 +312,22 @@ jobs:
         | 无用符号裁剪 | 已启用 (gc-sections) |
         | 文件类型 | ${FILE_INFO} |
 
-        ### 静态链接库体积
+        ### 依赖库体积
 
-        | 依赖库 | 版本 | 静态库大小 |
+        | 依赖库 | 版本 | 大小 |
         |--------|------|-----------|
-        | zlib | ${{ env.ZLIB_VER }} | ${SZ_ZLIB} 字节 |
-        | mbedTLS (tls+x509+crypto) | ${{ env.MBEDTLS_VER }} | ${SZ_MBEDTLS} 字节 |
-        | json-c | ${{ env.JSONC_VER }} | ${SZ_JSONC} 字节 |
-        | libevent | ${{ env.LIBEVENT_VER }} | ${SZ_LIBEVENT} 字节 |
+        | zlib | ${{ env.ZLIB_VER }} | ${SZ_ZLIB} 字节（动态 libz.so） |
+        | mbedTLS (tls+x509+crypto) | ${{ env.MBEDTLS_VER }} | ${SZ_MBEDTLS} 字节（动态 libmbed*.so） |
+        | json-c | ${{ env.JSONC_VER }} | ${SZ_JSONC} 字节（静态） |
+        | libevent | ${{ env.LIBEVENT_VER }} | ${SZ_LIBEVENT} 字节（静态） |
 
         ### 编译产物
 
         | 文件 | 大小 | 说明 |
         |------|------|------|
-        | \`xfrpc-${{ matrix.target }}\` | ${SZ_XFRPC} 字节 | 原始二进制，strip 后可直接运行 |
+        | \`xfrpc-${{ matrix.target }}\` | ${SZ_XFRPC} 字节 | 原始二进制（内嵌 \$ORIGIN rpath） |
         | \`xfrpc-${{ matrix.target }}_upx\` | （见后） | UPX 压缩版，二选一下载即可 |
+        | \`libz.so*\` / \`libmbed*.so*\` | 见上表 | 运行时动态库，必须与 xfrpc 同目录 |
         SUMMARYEOF
 
         # 保存到环境变量供后续步骤使用
@@ -334,13 +339,26 @@ jobs:
         version: v4.2.4
         install-only: true
 
-    - name: UPX 压缩
+    - name: UPX 压缩并打包动态库
       run: |
+        SYSROOT=/tmp/sysroot
         cd bin
         # 所有目标统一命名: xfrpc-$TARGET / xfrpc-$TARGET_upx
         cp xfrpc xfrpc-${{ matrix.target }}_upx
         mv xfrpc xfrpc-${{ matrix.target }}
-        upx --lzma --best xfrpc-${{ matrix.target }}_upx
+        upx --lzma --best xfrpc-${{ matrix.target }}_upx || {
+          echo "UPX 压缩失败（动态链接 ELF 可能不受支持），跳过压缩版"
+          rm -f xfrpc-${{ matrix.target }}_upx
+        }
+        # 复制运行时动态库（zlib/mbedTLS 动态链接，rpath=$ORIGIN，需与二进制同目录）
+        # cp -L 解引用符号链接，保证所有 SONAME 文件名（如 libz.so.1）齐全
+        cp -L $SYSROOT/lib/libz.so* .
+        cp -L $SYSROOT/lib/libmbedtls.so* .
+        cp -L $SYSROOT/lib/libmbedx509.so* .
+        cp -L $SYSROOT/lib/libmbedcrypto.so* .
+        $STRIP --strip-unneeded lib*.so*
+        echo -e "\n\033[32m✓ 动态库打包完成\033[0m"
+        ls -lh
 
     - name: 追加 UPX 结果到摘要
       run: |
@@ -384,17 +402,17 @@ jobs:
 
          ### 依赖库版本
 
-         | 依赖库 | 版本 |
-         |--------|------|
-         | zlib | ${{ env.ZLIB_VER }} |
-         | mbedTLS | ${{ env.MBEDTLS_VER }} |
-         | json-c | ${{ env.JSONC_VER }} |
-         | libevent | ${{ env.LIBEVENT_VER }} |
+         | 依赖库 | 版本 | 链接方式 |
+         |--------|------|----------|
+         | zlib | ${{ env.ZLIB_VER }} | 动态 (libz.so) |
+         | mbedTLS | ${{ env.MBEDTLS_VER }} | 动态 (libmbed*.so) |
+         | json-c | ${{ env.JSONC_VER }} | 静态 |
+         | libevent | ${{ env.LIBEVENT_VER }} | 静态 |
 
          ### 构建信息
 
          - **架构**: ${{ matrix.target }}
-         - **链接方式**: 完全静态 (musl)
+         - **链接方式**: zlib/mbedTLS 动态链接，json-c/libevent 静态链接（musl）
          - **TLS/加密后端**: mbedTLS ${{ env.MBEDTLS_VER }}（libevent event_mbedtls）
          - **编译优化**: \`-Os -ffunction-sections -fdata-sections -Wl,--gc-sections\`
 
@@ -406,9 +424,11 @@ jobs:
          |------|------|
          | \`xfrpc-${{ matrix.target }}\` | 原始编译二进制（strip 后），可直接运行 |
          | \`xfrpc-${{ matrix.target }}_upx\` | UPX --lzma --best 压缩版，体积更小 |
+         | \`libz.so*\` / \`libmbed*.so*\` | 运行时动态库，需与 xfrpc 放同一目录（rpath=$ORIGIN） |
 
          > 两者功能完全相同，**二选一下载即可**。UPX 版首次运行时会自动解压。
          > 下载后请先执行 \`chmod +x xfrpc-*\` 赋予执行权限。
+         > 注意：需 musl 运行环境（OpenWrt 默认自带），且同目录必须保留所有 \`lib*.so*\` 动态库文件。
 
          [提交记录](https://github.com/liudf0716/xfrpc/tree/${{ env.haxi }})
 
@@ -417,6 +437,7 @@ jobs:
         tag_name: ${{env.tag}}
         files: |
           bin/xfrpc-${{ matrix.target }}*
+          bin/lib*.so*
 
   del:
     runs-on: ubuntu-latest
