@@ -25,6 +25,49 @@
 #include <stdbool.h>
 
 #include "utils.h"
+#include "ssl_compat.h"
+
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+
+/* 全局随机数生成器：entropy + CTR_DRBG，首次使用时惰性初始化。
+ * xfrpc 为单线程事件循环模型，惰性初始化无需加锁。 */
+static mbedtls_entropy_context  g_entropy;
+static mbedtls_ctr_drbg_context g_ctr_drbg;
+static int g_rng_inited = 0;
+
+/**
+ * 全局随机数生成函数（mbedTLS f_rng 签名）。
+ * 首次调用时完成 entropy 采集器与 CTR_DRBG 的播种；
+ * p_rng 参数仅为满足 mbedTLS 回调签名，内部未使用。
+ *
+ * @param p_rng      mbedTLS 回调上下文（忽略）
+ * @param output     随机数输出缓冲区
+ * @param output_len 需要的随机数字节数
+ * @return 0 成功，非 0 为 mbedTLS 错误码
+ */
+int xfrpc_random(void *p_rng, unsigned char *output, size_t output_len)
+{
+	(void)p_rng;
+
+	if (!g_rng_inited) {
+		int ret;
+		mbedtls_entropy_init(&g_entropy);
+		mbedtls_ctr_drbg_init(&g_ctr_drbg);
+		/* 个性化字符串可为任意固定值，用于增强 DRBG 实例隔离 */
+		ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func,
+					    &g_entropy,
+					    (const unsigned char *)"xfrpc", 5);
+		if (ret != 0) {
+			mbedtls_ctr_drbg_free(&g_ctr_drbg);
+			mbedtls_entropy_free(&g_entropy);
+			return ret;
+		}
+		g_rng_inited = 1;
+	}
+
+	return mbedtls_ctr_drbg_random(&g_ctr_drbg, output, output_len);
+}
 
 /**
  * High precision sleep function using select

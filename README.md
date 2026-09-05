@@ -27,7 +27,7 @@ the following table is detail  compatible feature:
 | p2p  | No |  Yes  |
 | xtcp  | Yes |  Yes  |
 | stcp  | Yes |  Yes  |
-| quic transport  | Yes |  Yes  |
+| quic transport  | No |  Yes  |
 
 
 
@@ -41,18 +41,24 @@ the following table is detail  compatible feature:
 
 ### Build on Ubuntu 20.04.3 LTS
 
-xfrpc requires libevent, json-c, and OpenSSL.
+xfrpc requires libevent (>= 2.2, built with mbedTLS support), json-c, and mbedTLS (3.6.x).
 
 **Install dependencies on Ubuntu/Debian:**
 
 ```
 sudo apt-get update
-sudo apt-get install -y libjson-c-dev libevent-dev libssl-dev
+sudo apt-get install -y libjson-c-dev libmbedtls-dev
 ```
+
+> **Note:** TLS support requires libevent >= 2.2 with the `event_mbedtls` backend
+> (`bufferevent_mbedtls_*`). Most distribution packages still ship libevent 2.1.x
+> which only provides the OpenSSL backend; in that case build libevent 2.2 from
+> source with `-DEVENT__DISABLE_OPENSSL=ON -DEVENT__DISABLE_MBEDTLS=OFF`
+> (see `.github/workflows/linux.yml` for a complete static-build example).
 
 **Install dependencies on OpenWrt:**
 
-Install the OpenSSL and libevent packages (`libopenssl`, `libevent2`).
+Install the mbedTLS and libevent packages (`libmbedtls`, `libevent2`).
 
 **Build:**
 
@@ -68,21 +74,13 @@ make
 
 | Option | Default | Description |
 |---|---|---|
-| `-DENABLE_QUIC=ON` | OFF | Enable QUIC transport via ngtcp2 (requires ngtcp2 + nghttp3) |
 | `-DDEBUG=ON` | OFF | Enable debug build with address sanitizer |
-
-**Build with QUIC support:**
-
-```
-cmake .. -DENABLE_QUIC=ON
-make
-```
 
 This will compile xfrpc and create an executable in the build directory. You can then run xfrpc using the executable by running the appropriate command in terminal.
 
 ### TLS Backend
 
-xfrpc uses **OpenSSL** as its TLS backend: the TLS transport (via libevent `bufferevent_openssl`) and the crypto layer (PBKDF2, AES-128-CFB, MD5) both use the OpenSSL API.
+xfrpc uses **mbedTLS 3.6.x** as its only TLS/crypto backend: the TLS transport runs on libevent's `bufferevent_mbedtls_*` (libevent >= 2.2), and the crypto layer (PBKDF2-HMAC-SHA1, AES-128-CFB, MD5, CTR_DRBG random) uses the mbedTLS API directly. OpenSSL and wolfSSL are no longer used.
 
 ### Build static binary in Alpine container
 
@@ -150,44 +148,23 @@ local_port = 22
 remote_port = 6128
 ```
 
-+ xfrpc quic transport support
++ ~~xfrpc quic transport support~~ (not available in mbedTLS builds)
 
-xfrpc can connect to frps using QUIC (UDP-based transport) instead of TCP. QUIC provides faster connection establishment (0-RTT), built-in encryption (TLS 1.3), and better performance on lossy networks.
+xfrpc historically could connect to frps over QUIC (UDP-based transport) via
+ngtcp2. Since the TLS/crypto backend is now mbedTLS-only and ngtcp2 has no
+mbedTLS crypto backend (only OpenSSL/GnuTLS/wolfSSL/Picotls), QUIC is not
+compiled in. Configuring `protocol = quic` makes xfrpc log
+"QUIC not compiled in" and exit; use the default TCP transport instead.
 
-**frps configuration:**
-
-```
-# frps.ini
-[common]
-bind_port = 7000
-quicBindPort = 7000
-```
-
-**xfrpc configuration:**
-
-```
-# xfrpc_quic.ini
-[common]
-server_addr = your_server_ip
-server_port = 7000
-protocol = quic
-quic_bind_port = 7000
-
-[ssh]
-type = tcp
-local_ip = 127.0.0.1
-local_port = 22
-remote_port = 6128
-```
-
-**Configuration options:**
+<!--
+The QUIC configuration options below are kept for reference only and are
+ignored by current builds:
 
 | Option | Default | Description |
 |---|---|---|
-| `protocol` | `tcp` | Transport protocol: `tcp` or `quic` |
-| `quic_bind_port` | 0 | frps QUIC listening port (required when protocol=quic) |
-
-> **Note:** QUIC support requires building with `-DENABLE_QUIC=ON` and the ngtcp2/nghttp3 libraries installed.
+| `protocol` | `tcp` | Transport protocol: only `tcp` is supported |
+| `quic_bind_port` | 0 | frps QUIC listening port (unused) |
+-->
 
 This configuration tells the frp server (frps) to forward incoming connections on remote port 6128 to the xfrpc client. The xfrpc client, in turn, will forward these connections to the local service running on IP address 127.0.0.1 and port 22.
 

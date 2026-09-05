@@ -6,7 +6,8 @@
 # 2. cmake
 # 3. libevent-dev
 # 4. libjson-c
-# 5. openssl
+# 5. mbedtls (TLS/crypto backend; TLS transport also requires libevent >= 2.2
+#    built with event_mbedtls, see .github/workflows/linux.yml)
 # 6. libz-dev
 # the following is the config file
 
@@ -21,7 +22,7 @@ jobs:
           name: install dependencies
           command: |
             apt-get update
-            apt-get install -y gcc cmake libevent-dev libjson-c-dev libssl-dev libz-dev
+            apt-get install -y gcc cmake libevent-dev libjson-c-dev libmbedtls-dev libz-dev
 
       - run:
           name: install go-shadowsocks

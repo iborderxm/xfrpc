@@ -201,7 +201,7 @@ static void client_start_event_cb(struct bufferevent *bev, short what, void *ctx
 	// Handle connection errors and EOF
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		if (tls_is_enabled()) {
-			tls_log_errors("TLS work connection");
+			tls_log_bev_error(bev, "TLS work connection");
 		}
 		handle_client_error(client, bev, c_conf);
 		return;
@@ -491,31 +491,8 @@ static void new_work_connection(struct bufferevent *bev, struct tmux_stream *str
 	// Send work connection request
 	debug(LOG_DEBUG, "Sending new work connection request: length=%d", msg_len);
 
-	/* For QUIC work streams, send the initial NewWorkConn synchronously
-	 * on the QUIC wire so frps sees data before it can FIN the stream.
-	 * The bev/socketpair path is used for subsequent data relay. */
-#ifdef HAVE_NGTCP2
-        {
-                struct common_conf *qconf = get_common_config();
-                if (qconf && qconf->protocol && strcmp(qconf->protocol, "quic") == 0
-                    && bev != main_ctl->connect_bev) {
-                        struct msg_hdr *qmsg = NULL;
-                        size_t qtotal = 0;
-                        if (prepare_message(TypeNewWorkConn, work_conn_msg, msg_len,
-                                            &qmsg, &qtotal) == 0) {
-                                if (quic_work_stream_send_initial(qmsg, qtotal) < 0)
-                                        debug(LOG_ERR, "QUIC initial work conn send failed");
-                                free(qmsg);
-                                goto work_conn_cleanup;
-                        }
-                }
-        }
-#endif
         send_msg_frp_server(bev, TypeNewWorkConn, work_conn_msg, msg_len, stream);
 
-#ifdef HAVE_NGTCP2
-	work_conn_cleanup:
-#endif
         SAFE_FREE(work_conn_msg);
         SAFE_FREE(work_c);
 }
@@ -556,6 +533,11 @@ struct bufferevent *connect_server(struct event_base *base, const char *name, co
 	struct common_conf *c_conf = get_common_config();
 	if (c_conf && c_conf->protocol && strcmp(c_conf->protocol, "quic") == 0 &&
 	    strcmp(name, c_conf->server_addr) == 0 && port == c_conf->server_port) {
+		if (!quic_transport_available()) {
+			debug(LOG_ERR,
+			      "QUIC transport is not compiled in (mbedTLS build has no ngtcp2 backend)");
+			return NULL;
+		}
 		debug(LOG_INFO, "Work conn via QUIC stream to %s:%d", name, port);
 		return quic_open_work_stream(base);
 	}
@@ -1694,13 +1676,9 @@ static void connect_event_cb(struct bufferevent *bev, short what, void *ctx)
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		debug(LOG_DEBUG, "connect_event_cb error: what=0x%x, tls=%d", what, tls_is_enabled());
 		if (tls_is_enabled()) {
-			tls_log_errors("TLS connection");
-		}
-		unsigned long ssl_err;
-		while ((ssl_err = ERR_get_error()) != 0) {
-			char buf[256];
-			ERR_error_string_n(ssl_err, buf, sizeof(buf));
-			debug(LOG_DEBUG, "SSL error: %s", buf);
+			/* mbedTLS 无错误队列：最近一次 TLS 错误码保存在
+			 * bufferevent 上（libevent event_mbedtls 模块） */
+			tls_log_bev_error(bev, "TLS connection");
 		}
 		debug(LOG_ERR, "connect_event_cb disconnect event: what=0x%x", what);
 		handle_connection_failure(c_conf, &retry_times);
@@ -1803,6 +1781,11 @@ static int init_server_connection(struct bufferevent **bev_out,
 
 	// QUIC transport — async handshake, bev delivered via callback
 	if (c_conf && c_conf->protocol && strcmp(c_conf->protocol, "quic") == 0) {
+		if (!quic_transport_available()) {
+			debug(LOG_ERR,
+			      "QUIC transport is not compiled in (mbedTLS build has no ngtcp2 backend)");
+			return -1;
+		}
 		int quic_port = c_conf->quic_bind_port > 0 ?
 				c_conf->quic_bind_port : server_port;
 		debug(LOG_INFO, "Connecting to server [%s:%d] via QUIC...",
@@ -2596,12 +2579,6 @@ static void clear_main_control()
                 bufferevent_free(main_ctl->connect_bev);
                 main_ctl->connect_bev = NULL;
         }
-
-        // Reset QUIC connection state for clean reconnect
-#ifdef HAVE_NGTCP2
-        extern void quic_transport_reset(void);
-        quic_transport_reset();
-#endif
 
         // Reinitialize TCP multiplexing if enabled
         struct common_conf *conf = get_common_config();

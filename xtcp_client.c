@@ -39,12 +39,6 @@
 #include "crypto.h"
 #include "ssl_compat.h"
 
-
-
-#ifdef HAVE_NGTCP2
-#include "quic_transport.h"
-#endif
-
 /* ---- Constants ---- */
 #define MAX_CACHED_CLIENTS  16
 #define CLIENT_TIMEOUT_SEC  30
@@ -101,11 +95,6 @@ struct xtcp_client_session {
 	int                     extra_fds[256];
 	struct event           *extra_events[256];
 	int                     extra_fd_count;
-
-	/* QUIC transport */
-#ifdef HAVE_NGTCP2
-	struct quic_ctx        *quic;
-#endif
 
 	/* Local service connection */
 	struct bufferevent      *local_bev;
@@ -339,10 +328,10 @@ static void xtcp_client_send_sid_probe(struct xtcp_client_session *sess,
 	sid_msg.sid = sess->sid;
 	sid_msg.response = false;
 
-	/* Generate random nonce via OpenSSL */
+	/* Generate random nonce via mbedTLS CTR_DRBG */
 	char nonce[32];
 	unsigned char rand_buf[16];
-	RAND_bytes(rand_buf, sizeof(rand_buf));
+	xfrpc_random(NULL, rand_buf, sizeof(rand_buf));
 	static const char hex_chars[] = "0123456789abcdef";
 	int nonce_len = rand_buf[0] % 20;
 	for (int i = 0; i < nonce_len; i++)
@@ -446,7 +435,7 @@ static void xtcp_client_send_sid_probe_to_all(struct xtcp_client_session *sess)
 			if (n > 1000) n = 1000;
 			unsigned char rbuf[2];
 			for (int i = 0; i < n; i++) {
-				RAND_bytes(rbuf, 2);
+				xfrpc_random(NULL, rbuf, sizeof(rbuf));
 				int port = 1024 + ((rbuf[0] << 8 | rbuf[1]) % (65535 - 1024));
 				char addr[128];
 				snprintf(addr, sizeof(addr), "%s:%d", ip, port);
@@ -515,48 +504,6 @@ static void xtcp_client_start_make_hole(struct xtcp_client_session *sess)
 		xtcp_client_send_sid_probe_to_all(sess);
 	}
 }
-
-/* ---- QUIC callbacks ---- */
-#ifdef HAVE_NGTCP2
-static void client_quic_stream_recv_cb(int64_t stream_id,
-					const uint8_t *data, size_t datalen,
-					void *user_data)
-{
-	struct xtcp_client_session *sess = user_data;
-	if (!sess || !sess->local_bev) return;
-
-	struct evbuffer *output = bufferevent_get_output(sess->local_bev);
-	evbuffer_add(output, data, datalen);
-	debug(LOG_DEBUG, "XTCP-CLIENT-QUIC: relayed %zu bytes stream=%ld → local",
-	      datalen, (long)stream_id);
-}
-
-static void client_quic_stream_close_cb(int64_t stream_id,
-					 uint64_t app_error_code,
-					 void *user_data)
-{
-	struct xtcp_client_session *sess = user_data;
-	(void)stream_id; (void)app_error_code;
-	debug(LOG_INFO, "XTCP-CLIENT-QUIC: stream %ld closed", (long)stream_id);
-	xtcp_client_cleanup(sess);
-}
-
-static void client_quic_conn_ready_cb(void *user_data)
-{
-	struct xtcp_client_session *sess = user_data;
-	debug(LOG_INFO, "XTCP-CLIENT-QUIC: connection ready for '%s'",
-	      sess->ps->proxy_name);
-	sess->state = XTCP_CLI_RELAY;
-}
-
-static void client_quic_conn_close_cb(uint64_t error_code, void *user_data)
-{
-	struct xtcp_client_session *sess = user_data;
-	debug(LOG_INFO, "XTCP-CLIENT-QUIC: connection closed (err=%lu)",
-	      (unsigned long)error_code);
-	xtcp_client_cleanup(sess);
-}
-#endif
 
 /* ---- Tunnel-mode UDP callback (raw relay) ---- */
 static void xtcp_client_tunnel_udp_recv_cb(evutil_socket_t fd, short events, void *ctx)
@@ -632,17 +579,7 @@ static void xtcp_local_read_cb(struct bufferevent *bev, void *ctx)
 	size_t len = evbuffer_get_length(input);
 	if (len == 0) return;
 
-#ifdef HAVE_NGTCP2
-	if (sess->quic && quic_ctx_is_ready(sess->quic)) {
-		ssize_t written = quic_stream_write_evbuf(sess->quic, -1, input);
-		if (written < 0) {
-			debug(LOG_WARNING, "XTCP-CLIENT-QUIC: stream write failed");
-		}
-		return;
-	}
-#endif
-
-	/* Fallback: raw UDP with framing */
+	/* Raw UDP relay with framing */
 	uint8_t *data = evbuffer_pullup(input, len);
 	if (data && len > 0) {
 		if (len > 65535) len = 65535;
@@ -653,7 +590,7 @@ static void xtcp_local_read_cb(struct bufferevent *bev, void *ctx)
 
 		if (sess->use_encryption && sess->encoder) {
 			uint8_t *enc_data = NULL;
-			RAND_bytes(sess->encoder->iv, 16);
+			xfrpc_random(NULL, sess->encoder->iv, 16);
 			size_t enc_len = encrypt_data(data, len, sess->encoder, &enc_data);
 			if (enc_len > 0 && enc_data) {
 				payload_len = 16 + enc_len;
@@ -757,41 +694,7 @@ static void xtcp_client_enter_tunnel(struct xtcp_client_session *sess)
 			  xtcp_local_event_cb, sess);
 	bufferevent_enable(sess->local_bev, EV_READ | EV_WRITE);
 
-#ifdef HAVE_NGTCP2
-	/* Try QUIC transport */
-	debug(LOG_INFO, "XTCP-CLIENT: establishing QUIC transport");
-
-	struct quic_config qcfg = {
-		.alpn = "frp",
-		.max_idle_timeout_sec = 60,
-		.max_streams = 8,
-		.is_server = 1,  /* client side is QUIC server (accepts connection) */
-	};
-
-	struct quic_stream_callbacks qcbs = {
-		.on_recv = client_quic_stream_recv_cb,
-		.on_close = client_quic_stream_close_cb,
-		.on_conn_ready = client_quic_conn_ready_cb,
-		.on_conn_close = client_quic_conn_close_cb,
-		.user_data = sess,
-	};
-
-	sess->quic = quic_ctx_new(sess->base, sess->udp_fd,
-				  &sess->peer_addr, &qcfg, &qcbs);
-	if (!sess->quic) {
-		debug(LOG_WARNING, "XTCP-CLIENT: QUIC setup failed, using raw UDP");
-	} else {
-		if (sess->udp_event) {
-			event_del(sess->udp_event);
-			event_free(sess->udp_event);
-			sess->udp_event = NULL;
-		}
-		debug(LOG_INFO, "XTCP-CLIENT: QUIC transport active");
-		return;
-	}
-#endif
-
-	/* Fallback: raw UDP relay */
+	/* Raw UDP relay (QUIC transport is not compiled in with mbedTLS) */
 	debug(LOG_WARNING, "XTCP-CLIENT: using raw UDP relay");
 
 	/* Initialize tunnel encryption if configured */
@@ -844,13 +747,6 @@ static void xtcp_client_cleanup(struct xtcp_client_session *sess)
 	if (!sess) return;
 
 	xtcp_client_session_unregister(sess);
-
-#ifdef HAVE_NGTCP2
-	if (sess->quic) {
-		quic_ctx_free(sess->quic);
-		sess->quic = NULL;
-	}
-#endif
 
 	if (sess->local_bev) {
 		bufferevent_free(sess->local_bev);
@@ -935,10 +831,6 @@ void xtcp_client_run(struct event_base *base, struct proxy_client *client)
 			sess->secret_key = strdup(cc->auth_token);
 		}
 	}
-
-#ifdef HAVE_NGTCP2
-	sess->quic = NULL;
-#endif
 
 	/* Generate transaction ID */
 	nathole_gen_transaction_id(sess->transaction_id, sizeof(sess->transaction_id));

@@ -10,9 +10,10 @@ steps:
   persistCredentials: true
 
 - script: |
-    # install dependencies
+    # install dependencies (TLS/crypto backend: mbedTLS; TLS transport also
+    # requires libevent >= 2.2 built with event_mbedtls, see .github/workflows/linux.yml)
     sudo apt-get update
-    sudo apt-get install -y gcc cmake libevent-dev libjson-c-dev libssl-dev libz-dev
+    sudo apt-get install -y gcc cmake libevent-dev libjson-c-dev libmbedtls-dev libz-dev
     # go to build folder
     mkdir build
     cd build

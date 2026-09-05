@@ -6,9 +6,13 @@ ENV FRP_VERSION=0.61.0
 ENV XFRPC_VERSION=4.04.856
 
 # Install build dependencies
+# NOTE: TLS support requires libevent >= 2.2 with the event_mbedtls backend
+# (Alpine's libevent-dev is 2.1.x and only has the OpenSSL backend; for a
+# fully working TLS build, build libevent 2.2 from source, see
+# .github/workflows/linux.yml).
 RUN apk add --no-cache \
     libevent-dev \
-    openssl-dev \
+    mbedtls-dev \
     libc-dev \
     gcc \
     make \
@@ -59,7 +63,7 @@ RUN adduser -D -H -h /usr/local/xfrpc xfrpc
 # Install runtime dependencies
 RUN apk add --no-cache \
     libevent \
-    openssl \
+    mbedtls \
     libc-utils \
     json-c \
     zlib

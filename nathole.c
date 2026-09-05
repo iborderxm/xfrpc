@@ -28,6 +28,7 @@
 #include "nathole.h"
 #include "msg.h"
 #include "common.h"
+#include "crypto.h"
 #include "debug.h"
 
 /* ============================================================
@@ -40,7 +41,7 @@ static void random_hex(char *out, size_t len)
 	static const char hex[] = "0123456789abcdef";
 	unsigned char buf[32];
 	if (len > sizeof(buf)) len = sizeof(buf);
-	RAND_bytes(buf, (int)len);
+	xfrpc_random(NULL, buf, len);
 	for (size_t i = 0; i < len; i++)
 		out[i] = hex[buf[i] & 0xf];
 	out[len] = '\0';
@@ -71,15 +72,10 @@ int nathole_auth_key(const char *secret_key, time_t timestamp, char **out_key)
 	size_t seed_len = strlen(seed);
 
 	uint8_t digest[16];
-	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-	if (!ctx) return -1;
-	if (EVP_DigestInit_ex(ctx, EVP_md5(), NULL) != 1 ||
-	    EVP_DigestUpdate(ctx, seed, seed_len) != 1 ||
-	    EVP_DigestFinal_ex(ctx, digest, NULL) != 1) {
-		EVP_MD_CTX_free(ctx);
+	/* mbedTLS 单次 MD5：mbedtls_md5 内部完成 init/update/final，
+	 * 输出 16 字节摘要，失败返回非 0 */
+	if (mbedtls_md5((const unsigned char *)seed, seed_len, digest) != 0)
 		return -1;
-	}
-	EVP_MD_CTX_free(ctx);
 
 	char *key = malloc(33);
 	if (!key) return -1;
@@ -144,7 +140,7 @@ static int stun_build_request(uint8_t *buf, size_t buf_len, uint8_t *txid_out)
 	buf[6] = 0xA4;
 	buf[7] = 0x42;
 	/* Transaction ID (12 random bytes) */
-	RAND_bytes(txid_out, STUN_TXID_LEN);
+	xfrpc_random(NULL, txid_out, STUN_TXID_LEN);
 	memcpy(buf + 8, txid_out, STUN_TXID_LEN);
 
 	return 20;
@@ -580,9 +576,9 @@ int classify_nat_feature(const char **addrs, int addr_count,
 static void derive_nathole_key(const char *secret_key, uint8_t *out_key)
 {
 	const char *salt = "crypto";
-	PKCS5_PBKDF2_HMAC(secret_key, (int)strlen(secret_key),
-		(const unsigned char *)salt, (int)strlen(salt),
-		64, EVP_sha1(), 16, out_key);
+	xfrpc_pbkdf2_sha1(secret_key, strlen(secret_key),
+	                  (const unsigned char *)salt, strlen(salt),
+	                  64, out_key, 16);
 }
 
 /* Encrypt data using AES-128-CFB.
@@ -597,28 +593,22 @@ static int aes_cfb_encrypt(const uint8_t *in, size_t in_len,
 
 	/* Generate random IV */
 	uint8_t iv[16];
-	RAND_bytes(iv, 16);
+	if (xfrpc_random(NULL, iv, 16) != 0) return -1;
 	memcpy(out, iv, 16);
 
-	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-	if (!ctx) return -1;
-
+	struct xfrpc_cfb_ctx cfb;
 	int ret = -1;
-	int outl = 0, total = 0;
 
-	if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cfb128(), NULL, key, iv) != 1)
+	xfrpc_cfb_init(&cfb);
+	/* CFB stream cipher: ciphertext length == plaintext length, no Final */
+	if (xfrpc_cfb_set_key(&cfb, key, iv, 1 /* encrypt */) != 0)
 		goto done;
-	/* CFB mode doesn't need padding, but we must finalize to flush */
-	if (EVP_EncryptUpdate(ctx, out + 16, &outl, in, in_len) != 1)
+	if (xfrpc_cfb_update(&cfb, out + 16, in, in_len) != 0)
 		goto done;
-	total = outl;
-	if (EVP_EncryptFinal_ex(ctx, out + 16 + total, &outl) != 1)
-		goto done;
-	total += outl;
-	ret = 16 + total;
+	ret = 16 + (int)in_len;
 
 done:
-	EVP_CIPHER_CTX_free(ctx);
+	xfrpc_cfb_free(&cfb);
 	return ret;
 }
 
@@ -639,24 +629,18 @@ static int aes_cfb_decrypt(const uint8_t *in, size_t in_len,
 
 	if (out_len < ciphertext_len) return -1;
 
-	EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-	if (!ctx) return -1;
-
+	struct xfrpc_cfb_ctx cfb;
 	int ret = -1;
-	int outl = 0, total = 0;
 
-	if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cfb128(), NULL, key, iv) != 1)
+	xfrpc_cfb_init(&cfb);
+	if (xfrpc_cfb_set_key(&cfb, key, iv, 0 /* decrypt */) != 0)
 		goto done;
-	if (EVP_DecryptUpdate(ctx, out, &outl, ciphertext, ciphertext_len) != 1)
+	if (xfrpc_cfb_update(&cfb, out, ciphertext, ciphertext_len) != 0)
 		goto done;
-	total = outl;
-	if (EVP_DecryptFinal_ex(ctx, out + total, &outl) != 1)
-		goto done;
-	total += outl;
-	ret = total;
+	ret = (int)ciphertext_len;
 
 done:
-	EVP_CIPHER_CTX_free(ctx);
+	xfrpc_cfb_free(&cfb);
 	return ret;
 }
 

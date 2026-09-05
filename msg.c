@@ -47,8 +47,8 @@
  * @param datalen Length of input data in bytes
  * @param digest Output buffer for MD5 hash (must be at least 16 bytes)
  * @return int 0 on success, -1 on failure
- * 
- * @note This function uses OpenSSL's EVP interface to calculate MD5 hash.
+ *
+ * @note This function uses mbedTLS to calculate the MD5 hash.
  *       The digest parameter must point to a buffer of at least 16 bytes.
  */
 static int calc_md5(const uint8_t *data, int datalen, uint8_t *digest)
@@ -58,40 +58,13 @@ static int calc_md5(const uint8_t *data, int datalen, uint8_t *digest)
 		return -1;
 	}
 
-	EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-	if (!mdctx) {
-		debug(LOG_ERR, "Failed to create MD5 context");
+	/* mbedtls_md5 为一次性 MD5 计算，输出固定 16 字节 */
+	if (mbedtls_md5(data, (size_t)datalen, digest) != 0) {
+		debug(LOG_ERR, "Failed to calculate MD5");
 		return -1;
 	}
 
-	int ret = -1;
-	const EVP_MD *md = EVP_md5();
-	if (!md) {
-		debug(LOG_ERR, "Failed to get MD5 algorithm");
-		goto cleanup;
-	}
-
-	if (EVP_DigestInit_ex(mdctx, md, NULL) != 1) {
-		debug(LOG_ERR, "Failed to initialize MD5");
-		goto cleanup;
-	}
-
-	if (EVP_DigestUpdate(mdctx, data, datalen) != 1) {
-		debug(LOG_ERR, "Failed to update MD5");
-		goto cleanup;
-	}
-
-	unsigned int md_len = 0;
-	if (EVP_DigestFinal_ex(mdctx, digest, &md_len) != 1) {
-		debug(LOG_ERR, "Failed to finalize MD5");
-		goto cleanup;
-	}
-
-	ret = 0; // Success
-
-cleanup:
-	EVP_MD_CTX_free(mdctx);
-	return ret;
+	return 0;
 }
 
 /**

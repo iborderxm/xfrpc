@@ -44,15 +44,107 @@ static struct frp_coder *main_decoder = NULL;
 
 /**
  * Persistent encryption context for improved performance
- * Reused across multiple encrypt_data() calls
+ * Reused across multiple encrypt_data() calls (AES-128-CFB stream state)
  */
-static EVP_CIPHER_CTX *enc_ctx = NULL;
+static struct xfrpc_cfb_ctx *enc_ctx = NULL;
 
 /**
  * Persistent decryption context for improved performance
- * Reused across multiple decrypt_data() calls
+ * Reused across multiple decrypt_data() calls (AES-128-CFB stream state)
  */
-static EVP_CIPHER_CTX *dec_ctx = NULL;
+static struct xfrpc_cfb_ctx *dec_ctx = NULL;
+
+/* ============================================================
+ * mbedTLS 加密原语实现
+ * ============================================================ */
+
+int xfrpc_pbkdf2_sha1(const char *password, size_t password_len,
+                      const unsigned char *salt, size_t salt_len,
+                      unsigned int iterations,
+                      unsigned char *key, size_t key_len)
+{
+	const mbedtls_md_info_t *md_info;
+	mbedtls_md_context_t md_ctx;
+	int ret;
+
+	if (!password || !salt || !key || key_len == 0)
+		return -1;
+
+	md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+	if (!md_info)
+		return -1;
+
+	mbedtls_md_init(&md_ctx);
+	ret = mbedtls_md_setup(&md_ctx, md_info, 1 /* HMAC */);
+	if (ret != 0) {
+		mbedtls_md_free(&md_ctx);
+		return ret;
+	}
+
+	/* PBKDF2-HMAC-SHA1：mbedtls_pkcs5_pbkdf2_hmac 内部负责 starts/update/finalize */
+	ret = mbedtls_pkcs5_pbkdf2_hmac(&md_ctx,
+	                                 (const unsigned char *)password, password_len,
+	                                 salt, salt_len,
+	                                 iterations,
+	                                 (uint32_t)key_len, key);
+	mbedtls_md_free(&md_ctx);
+	return ret;
+}
+
+void xfrpc_cfb_init(struct xfrpc_cfb_ctx *ctx)
+{
+	if (!ctx) return;
+	memset(ctx, 0, sizeof(*ctx));
+	mbedtls_aes_init(&ctx->aes);
+}
+
+int xfrpc_cfb_set_key(struct xfrpc_cfb_ctx *ctx,
+                      const unsigned char key[16],
+                      const unsigned char iv[16],
+                      int encrypt)
+{
+	int ret;
+
+	if (!ctx || !key || !iv)
+		return -1;
+
+	if (!ctx->inited) {
+		mbedtls_aes_init(&ctx->aes);
+		ctx->inited = 1;
+	}
+
+	/* CFB/OFB/CTR 模式内部只使用 AES 正向加密变换，
+	 * 因此加密与解密方向都调用 setkey_enc（mbedTLS 官方用法）。 */
+	ret = mbedtls_aes_setkey_enc(&ctx->aes, key, 128);
+	if (ret != 0)
+		return ret;
+
+	memcpy(ctx->iv, iv, 16);
+	ctx->iv_off = 0;
+	ctx->encrypt = encrypt ? 1 : 0;
+	return 0;
+}
+
+int xfrpc_cfb_update(struct xfrpc_cfb_ctx *ctx,
+                     unsigned char *out,
+                     const unsigned char *in, size_t len)
+{
+	if (!ctx || !ctx->inited || !in || !out)
+		return -1;
+
+	return mbedtls_aes_crypt_cfb128(&ctx->aes,
+	                                ctx->encrypt ? MBEDTLS_AES_ENCRYPT : MBEDTLS_AES_DECRYPT,
+	                                len, &ctx->iv_off, ctx->iv,
+	                                in, out);
+}
+
+void xfrpc_cfb_free(struct xfrpc_cfb_ctx *ctx)
+{
+	if (!ctx) return;
+	if (ctx->inited)
+		mbedtls_aes_free(&ctx->aes);
+	memset(ctx, 0, sizeof(*ctx));
+}
 
 /**
  * @brief Frees all resources associated with a frp_coder structure
@@ -102,12 +194,14 @@ void free_crypto_resources(void)
 	free_all_frp_coders();
 
 	if (enc_ctx) {
-		EVP_CIPHER_CTX_free(enc_ctx);
+		xfrpc_cfb_free(enc_ctx);
+		free(enc_ctx);
 		enc_ctx = NULL;
 	}
 
 	if (dec_ctx) {
-		EVP_CIPHER_CTX_free(dec_ctx);
+		xfrpc_cfb_free(dec_ctx);
+		free(dec_ctx);
 		dec_ctx = NULL;
 	}
 }
@@ -206,7 +300,8 @@ struct frp_coder *init_main_encoder()
 	/* Reset persistent encryption context so it re-initializes with
 	 * the new encoder's key/IV on next encrypt_data() call. */
 	if (enc_ctx) {
-		EVP_CIPHER_CTX_free(enc_ctx);
+		xfrpc_cfb_free(enc_ctx);
+		free(enc_ctx);
 		enc_ctx = NULL;
 	}
 	return main_encoder;
@@ -241,7 +336,8 @@ struct frp_coder *init_main_decoder(const uint8_t *iv)
 	/* Reset persistent decryption context so it re-initializes with
 	 * the new decoder's key/IV on next decrypt_data() call. */
 	if (dec_ctx) {
-		EVP_CIPHER_CTX_free(dec_ctx);
+		xfrpc_cfb_free(dec_ctx);
+		free(dec_ctx);
 		dec_ctx = NULL;
 	}
 	return main_decoder;
@@ -318,9 +414,12 @@ unsigned char *encrypt_key(const char *token, size_t token_len, const char *salt
 		return NULL;
 	}
 
-	PKCS5_PBKDF2_HMAC(token, (int)token_len,
-					  (const unsigned char *)salt, (int)strlen(salt),
-					  64, EVP_sha1(), (int)block_size, key);
+	/* PBKDF2-HMAC-SHA1，64 轮迭代，输出 16 字节 AES-128 密钥 */
+	if (xfrpc_pbkdf2_sha1(token, token_len,
+	                      (const unsigned char *)salt, strlen(salt),
+	                      64, key, block_size) != 0) {
+		return NULL;
+	}
 	return key;
 }
 
@@ -341,7 +440,7 @@ unsigned char *encrypt_iv(unsigned char *iv_buf, size_t iv_len)
 		return NULL;
 	}
 
-	if (RAND_bytes(iv_buf, iv_len) != 1) {
+	if (xfrpc_random(NULL, iv_buf, iv_len) != 0) {
 		debug(LOG_ERR, "Failed to generate random IV");
 		return NULL;
 	}
@@ -352,9 +451,10 @@ unsigned char *encrypt_iv(unsigned char *iv_buf, size_t iv_len)
 /**
  * @brief Encrypts data using AES-128-CFB cipher
  *
- * This function encrypts data using AES-128-CFB cipher mode with no padding.
- * It uses a persistent EVP_CIPHER_CTX context (enc_ctx) for better performance
- * across multiple calls.
+ * This function encrypts data using AES-128-CFB128 stream cipher (no padding,
+ * output length == input length). It uses a persistent xfrpc_cfb_ctx context
+ * (enc_ctx) whose IV state rolls continuously across calls, matching the
+ * OpenSSL EVP_aes_128_cfb() stream semantics.
  *
  * @param src_data Pointer to the source data buffer to encrypt
  * @param srclen Length of the source data
@@ -362,65 +462,62 @@ unsigned char *encrypt_iv(unsigned char *iv_buf, size_t iv_len)
  * @param ret Address where the pointer to encrypted data will be stored
  * @return The length of the encrypted data, or 0 if encryption fails
  */
-size_t encrypt_data(const uint8_t *src_data, size_t srclen, 
+size_t encrypt_data(const uint8_t *src_data, size_t srclen,
 				   struct frp_coder *encoder, uint8_t **ret)
 {
-	int outlen = 0, tmplen = 0;
-	uint8_t *outbuf = NULL;
-	EVP_CIPHER_CTX *ctx = NULL;
-	
 	// Input validation
 	if (!src_data || !encoder || !ret) {
 		debug(LOG_ERR, "Invalid input parameters");
 		return 0;
 	}
 
-	// Allocate output buffer
-	outbuf = calloc(srclen + 1, 1);
+	// Allocate output buffer (CFB stream: output length == input length)
+	uint8_t *outbuf = calloc(srclen + 1, 1);
 	if (!outbuf) {
 		debug(LOG_ERR, "Failed to allocate output buffer");
 		return 0;
 	}
 	*ret = outbuf;
 
-	// Initialize or reuse encryption context
+	// Initialize or reuse the persistent encryption context
 	if (!enc_ctx) {
-		enc_ctx = EVP_CIPHER_CTX_new();
+		enc_ctx = calloc(1, sizeof(*enc_ctx));
 		if (!enc_ctx) {
 			debug(LOG_ERR, "Failed to create cipher context");
+			free(outbuf);
+			*ret = NULL;
 			return 0;
 		}
-		EVP_EncryptInit_ex(enc_ctx, EVP_aes_128_cfb(), NULL, 
-						  encoder->key, encoder->iv);
+		xfrpc_cfb_init(enc_ctx);
+		if (xfrpc_cfb_set_key(enc_ctx, encoder->key, encoder->iv, 1 /* encrypt */) != 0) {
+			debug(LOG_ERR, "AES-128-CFB encrypt init failed!");
+			xfrpc_cfb_free(enc_ctx);
+			free(enc_ctx);
+			enc_ctx = NULL;
+			free(outbuf);
+			*ret = NULL;
+			return 0;
+		}
 	}
-	ctx = enc_ctx;
 
-	// Perform encryption
-	if (!EVP_EncryptUpdate(ctx, outbuf, &tmplen, src_data, srclen)) {
-		debug(LOG_ERR, "EVP_EncryptUpdate error!");
+	// Perform encryption (stream cipher: no Final needed)
+	if (xfrpc_cfb_update(enc_ctx, outbuf, src_data, srclen) != 0) {
+		debug(LOG_ERR, "AES-128-CFB encrypt error!");
 		free(outbuf);
 		*ret = NULL;
 		return 0;
 	}
-	outlen = tmplen;
 
-	if (!EVP_EncryptFinal_ex(ctx, outbuf + outlen, &tmplen)) {
-		debug(LOG_ERR, "EVP_EncryptFinal_ex error!");
-		free(outbuf);
-		*ret = NULL;
-		return 0;
-	}
-	outlen += tmplen;
-
-	return outlen;
+	return srclen;
 }
 
 /**
  * @brief Decrypts data using AES-128-CFB cipher
  *
- * This function decrypts data that was encrypted using AES-128-CFB cipher mode.
- * It uses a persistent EVP_CIPHER_CTX context (dec_ctx) for better performance
- * across multiple calls.
+ * This function decrypts data that was encrypted using AES-128-CFB128 stream
+ * cipher (no padding, output length == input length). It uses a persistent
+ * xfrpc_cfb_ctx context (dec_ctx) whose IV state rolls continuously across
+ * calls, matching the OpenSSL EVP_aes_128_cfb() stream semantics.
  *
  * @param enc_data Pointer to the encrypted data buffer
  * @param enclen Length of the encrypted data
@@ -428,57 +525,53 @@ size_t encrypt_data(const uint8_t *src_data, size_t srclen,
  * @param ret Address where the pointer to decrypted data will be stored
  * @return The length of the decrypted data, or 0 if decryption fails
  */
-size_t decrypt_data(const uint8_t *enc_data, size_t enclen, 
+size_t decrypt_data(const uint8_t *enc_data, size_t enclen,
 				   struct frp_coder *decoder, uint8_t **ret)
 {
-	int outlen = 0, tmplen = 0;
-	uint8_t *outbuf = NULL;
-	EVP_CIPHER_CTX *ctx = NULL;
-	
 	// Input validation
 	if (!enc_data || !decoder || !ret) {
 		debug(LOG_ERR, "Invalid input parameters");
 		return 0;
 	}
 
-	// Allocate output buffer
-	outbuf = calloc(enclen + 1, 1);
+	// Allocate output buffer (CFB stream: output length == input length)
+	uint8_t *outbuf = calloc(enclen + 1, 1);
 	if (!outbuf) {
 		debug(LOG_ERR, "Failed to allocate output buffer");
 		return 0;
 	}
 	*ret = outbuf;
 
-	// Initialize or reuse decryption context
+	// Initialize or reuse the persistent decryption context
 	if (!dec_ctx) {
-		dec_ctx = EVP_CIPHER_CTX_new();
+		dec_ctx = calloc(1, sizeof(*dec_ctx));
 		if (!dec_ctx) {
 			debug(LOG_ERR, "Failed to create cipher context");
+			free(outbuf);
+			*ret = NULL;
 			return 0;
 		}
-		EVP_DecryptInit_ex(dec_ctx, EVP_aes_128_cfb(), NULL, 
-						  decoder->key, decoder->iv);
+		xfrpc_cfb_init(dec_ctx);
+		if (xfrpc_cfb_set_key(dec_ctx, decoder->key, decoder->iv, 0 /* decrypt */) != 0) {
+			debug(LOG_ERR, "AES-128-CFB decrypt init failed!");
+			xfrpc_cfb_free(dec_ctx);
+			free(dec_ctx);
+			dec_ctx = NULL;
+			free(outbuf);
+			*ret = NULL;
+			return 0;
+		}
 	}
-	ctx = dec_ctx;
 
-	// Perform decryption
-	if (!EVP_DecryptUpdate(ctx, outbuf, &tmplen, enc_data, enclen)) {
-		debug(LOG_ERR, "EVP_DecryptUpdate error!");
+	// Perform decryption (stream cipher: no Final needed)
+	if (xfrpc_cfb_update(dec_ctx, outbuf, enc_data, enclen) != 0) {
+		debug(LOG_ERR, "AES-128-CFB decrypt error!");
 		free(outbuf);
 		*ret = NULL;
 		return 0;
 	}
-	outlen = tmplen;
 
-	if (!EVP_DecryptFinal_ex(ctx, outbuf + outlen, &tmplen)) {
-		debug(LOG_ERR, "EVP_DecryptFinal_ex error");
-		free(outbuf);
-		*ret = NULL;
-		return 0;
-	}
-	outlen += tmplen;
-
-	return outlen;
+	return enclen;
 }
 
 /**

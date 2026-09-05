@@ -14,31 +14,24 @@ find_package(LibEvent REQUIRED)
 find_package(JSON-C REQUIRED)
 find_package(ZLIB REQUIRED)
 
-# TLS/SSL backend: OpenSSL (required)
-# tls.c uses real OpenSSL API (libevent bufferevent_openssl requires struct ssl_st *).
-# crypto.c/crypto_stream.c use OpenSSL EVP (PBKDF2/AES-128-CFB/MD5/RAND).
-find_package(OpenSSL REQUIRED)
-set(SSL_LIBRARIES ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
-message(STATUS "TLS backend: OpenSSL (${OPENSSL_SSL_LIBRARY})")
-
-# Optional: ngtcp2 for QUIC support (Xtcp P2P)
-option(ENABLE_QUIC "Enable QUIC transport via ngtcp2" OFF)
-if(ENABLE_QUIC)
-    find_library(NGTCP2_LIB ngtcp2)
-    find_path(NGTCP2_INCLUDE_DIR ngtcp2/ngtcp2.h)
-    # QUIC uses the ngtcp2 OpenSSL crypto backend only (wolfSSL backend removed)
-    find_library(NGTCP2_CRYPTO_LIB ngtcp2_crypto_ossl)
-    if(NGTCP2_LIB AND NGTCP2_CRYPTO_LIB AND NGTCP2_INCLUDE_DIR)
-        message(STATUS "QUIC support: ON (ngtcp2 found, crypto backend: ossl)")
-        add_definitions(-DHAVE_NGTCP2)
-        include_directories(${NGTCP2_INCLUDE_DIR})
-        set(HAS_QUIC ON)
-    else()
-        message(WARNING "QUIC support: OFF (ngtcp2 not found, set NGTCP2_LIB/NGTCP2_INCLUDE_DIR)")
-    endif()
-else()
-    message(STATUS "QUIC support: OFF (set -DENABLE_QUIC=ON to enable)")
+# TLS/SSL + crypto backend: mbedTLS 3.6.x (required)
+# - TLS transport: libevent bufferevent_mbedtls (libevent >= 2.2), see tls.c
+# - Crypto layer: PBKDF2/AES-128-CFB/MD5 (crypto.c, crypto_stream.c, nathole.c)
+find_path(MBEDTLS_INCLUDE_DIR mbedtls/ssl.h)
+find_library(MBEDTLS_LIBRARY    NAMES mbedtls)
+find_library(MBEDX509_LIBRARY   NAMES mbedx509)
+find_library(MBEDCRYPTO_LIBRARY NAMES mbedcrypto)
+if(NOT MBEDTLS_INCLUDE_DIR OR NOT MBEDTLS_LIBRARY OR NOT MBEDX509_LIBRARY OR NOT MBEDCRYPTO_LIBRARY)
+    message(FATAL_ERROR "mbedTLS not found. Install mbedTLS 3.6.x (mbedtls/mbedx509/mbedcrypto).")
 endif()
+include_directories(${MBEDTLS_INCLUDE_DIR})
+set(SSL_LIBRARIES ${MBEDTLS_LIBRARY} ${MBEDX509_LIBRARY} ${MBEDCRYPTO_LIBRARY})
+message(STATUS "TLS/crypto backend: mbedTLS (${MBEDTLS_LIBRARY})")
+
+# NOTE: QUIC transport (quic_transport.c) is not built with mbedTLS:
+# ngtcp2 has no mbedTLS crypto backend (only OpenSSL/GnuTLS/wolfSSL/Picotls).
+# quic_client_transport.c is still compiled and provides stub functions
+# that report "QUIC not compiled in".
 
 include_directories(
     ${JSON-C_INCLUDE_DIR}
@@ -108,13 +101,9 @@ set(PROXY_SOURCES
     tcp_redir.c
     mongoose.c
 )
-# quic_transport.c is added conditionally via ENABLE_QUIC above;
-# quic_client_transport.c is always compiled (has #ifdef stubs)
-if(HAS_QUIC)
-    list(APPEND PROXY_SOURCES quic_transport.c quic_client_transport.c)
-else()
-    list(APPEND PROXY_SOURCES quic_client_transport.c)
-endif()
+# quic_client_transport.c is always compiled but only provides stubs
+# ("QUIC not compiled in"): ngtcp2 has no mbedTLS crypto backend.
+list(APPEND PROXY_SOURCES quic_client_transport.c)
 
 set(PLUGIN_SOURCES
     plugins/telnetd.c
@@ -141,15 +130,10 @@ set(SYSTEM_LIBS
 set(EXTERNAL_LIBS
     ${SSL_LIBRARIES}
     event
-    event_openssl
+    event_mbedtls
     ${JSON-C_LIBRARIES}
     ${ZLIB_LIBRARIES}
 )
-
-# Add QUIC libraries if enabled
-if(HAS_QUIC)
-    list(APPEND EXTERNAL_LIBS ${NGTCP2_CRYPTO_LIB} ${NGTCP2_LIB})
-endif()
 
 # Set debug flags
 if(DEBUG)

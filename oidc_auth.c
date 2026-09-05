@@ -6,7 +6,7 @@
  * Implements OAuth2 client_credentials grant to obtain access tokens.
  * Compatible with frp's auth.oidc.* configuration.
  *
- * Uses raw HTTP/HTTPS POST via OpenSSL + sockets (no external HTTP library).
+ * Uses raw HTTP/HTTPS POST via mbedTLS + sockets (no external HTTP library).
  */
 
 #include <stdio.h>
@@ -17,11 +17,12 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
 #include <json-c/json.h>
 
 #include "oidc_auth.h"
+#include "tls.h"
 #include "debug.h"
 
 #define OIDC_RESPONSE_MAX 8192
@@ -132,27 +133,74 @@ static int send_all(int fd, const void *buf, size_t len)
 	return 0;
 }
 
+/* ---- mbedTLS BIO 回调：通过阻塞式 socket fd 收发 ---- */
+
+static int oidc_bio_send(void *ctx, const unsigned char *buf, size_t len)
+{
+	int fd = *(int *)ctx;
+	ssize_t n;
+	do {
+		n = send(fd, buf, len, 0);
+	} while (n < 0 && errno == EINTR);
+
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return MBEDTLS_ERR_SSL_WANT_WRITE;
+		return MBEDTLS_ERR_NET_SEND_FAILED;
+	}
+	return (int)n;
+}
+
+static int oidc_bio_recv(void *ctx, unsigned char *buf, size_t len)
+{
+	int fd = *(int *)ctx;
+	ssize_t n;
+	do {
+		n = recv(fd, buf, len, 0);
+	} while (n < 0 && errno == EINTR);
+
+	if (n == 0)
+		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return MBEDTLS_ERR_SSL_WANT_READ;
+		return MBEDTLS_ERR_NET_RECV_FAILED;
+	}
+	return (int)n;
+}
+
 /* ---- SSL send/recv helpers ---- */
 
-static int ssl_send_all(SSL *ssl, const void *buf, size_t len)
+static int ssl_send_all(mbedtls_ssl_context *ssl, const void *buf, size_t len)
 {
-	const char *p = buf;
+	const unsigned char *p = buf;
 	while (len > 0) {
-		int n = SSL_write(ssl, p, len);
+		int n = mbedtls_ssl_write(ssl, p, len);
+		if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+		    n == MBEDTLS_ERR_SSL_WANT_WRITE)
+			continue;
 		if (n <= 0) return -1;
 		p += n;
-		len -= n;
+		len -= (size_t)n;
 	}
 	return 0;
 }
 
-static int ssl_recv_all(SSL *ssl, char *buf, size_t buf_size, size_t *out_len)
+static int ssl_recv_all(mbedtls_ssl_context *ssl, char *buf, size_t buf_size, size_t *out_len)
 {
 	*out_len = 0;
 	while (*out_len < buf_size - 1) {
-		int n = SSL_read(ssl, buf + *out_len, buf_size - 1 - *out_len);
-		if (n <= 0) break;
-		*out_len += n;
+		int n = mbedtls_ssl_read(ssl,
+		                         (unsigned char *)buf + *out_len,
+		                         buf_size - 1 - *out_len);
+		if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+		    n == MBEDTLS_ERR_SSL_WANT_WRITE)
+			continue;
+		if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+			break;
+		if (n <= 0)
+			break;
+		*out_len += (size_t)n;
 	}
 	buf[*out_len] = '\0';
 	return (*out_len > 0) ? 0 : -1;
@@ -290,64 +338,81 @@ char *oidc_fetch_token(const char *token_endpoint_url,
 	int fd = tcp_connect(url.host, url.port);
 	if (fd < 0) return NULL;
 
-	SSL *ssl = NULL;
-	SSL_CTX *ssl_ctx = NULL;
+	/* TLS objects (only used when the endpoint is https) */
+	mbedtls_ssl_context  ssl;
+	mbedtls_ssl_config   ssl_conf;
+	mbedtls_x509_crt     ca_crt;
+	int use_tls = 0;
+	int ret;
 
 	if (url.is_https) {
-		ssl_ctx = SSL_CTX_new(TLS_client_method());
-		if (!ssl_ctx) {
-			close(fd);
-			return NULL;
+		mbedtls_ssl_init(&ssl);
+		mbedtls_ssl_config_init(&ssl_conf);
+		mbedtls_x509_crt_init(&ca_crt);
+
+		/* 配置 RNG/CA/鉴权策略（ca_file 为 NULL 时探测系统信任库） */
+		ret = tls_configure_client_ssl(&ssl_conf, &ca_crt,
+		                               trusted_ca_file, insecure_skip_verify);
+		if (ret != 0) {
+			debug(LOG_ERR, "OIDC: TLS config failed");
+			goto tls_fail;
 		}
-		if (insecure_skip_verify) {
-			SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, NULL);
-		} else if (trusted_ca_file) {
-			SSL_CTX_load_verify_locations(ssl_ctx, trusted_ca_file, NULL);
-			SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, NULL);
+
+		if (mbedtls_ssl_setup(&ssl, &ssl_conf) != 0) {
+			debug(LOG_ERR, "OIDC: mbedtls_ssl_setup failed");
+			goto tls_fail;
 		}
-		ssl = SSL_new(ssl_ctx);
-		SSL_set_fd(ssl, fd);
-		SSL_set_tlsext_host_name(ssl, url.host);
-		if (SSL_connect(ssl) != 1) {
-			debug(LOG_ERR, "OIDC: TLS handshake failed");
-			SSL_free(ssl);
-			SSL_CTX_free(ssl_ctx);
-			close(fd);
-			return NULL;
+
+		/* BIO 绑定到阻塞式 socket fd */
+		mbedtls_ssl_set_bio(&ssl, &fd, oidc_bio_send, oidc_bio_recv, NULL);
+
+		/* SNI 与证书主机名校验（url.host 在整个函数内有效） */
+		if (mbedtls_ssl_set_hostname(&ssl, url.host) != 0) {
+			debug(LOG_ERR, "OIDC: mbedtls_ssl_set_hostname failed");
+			goto tls_fail;
 		}
+
+		/* 阻塞式握手（WANT_READ/WRITE 时重试） */
+		int hs;
+		while ((hs = mbedtls_ssl_handshake(&ssl)) != 0) {
+			if (hs != MBEDTLS_ERR_SSL_WANT_READ &&
+			    hs != MBEDTLS_ERR_SSL_WANT_WRITE) {
+				char ebuf[128];
+				mbedtls_strerror(hs, ebuf, sizeof(ebuf));
+				debug(LOG_ERR, "OIDC: TLS handshake failed: -0x%04X (%s)",
+				      (unsigned)-hs, ebuf);
+				goto tls_fail;
+			}
+		}
+		use_tls = 1;
+		debug(LOG_INFO, "OIDC: TLS handshake OK");
 	}
 
 	/* Send request */
-	int ret;
-	if (ssl) {
-		ret = ssl_send_all(ssl, request, req_len);
+	if (use_tls) {
+		ret = ssl_send_all(&ssl, request, (size_t)req_len);
 	} else {
 		ret = send_all(fd, request, req_len);
 	}
 	if (ret < 0) {
 		debug(LOG_ERR, "OIDC: failed to send request");
-		if (ssl) { SSL_free(ssl); SSL_CTX_free(ssl_ctx); }
-		close(fd);
-		return NULL;
+		goto tls_fail;
 	}
 
 	/* Read response */
 	char *response = malloc(OIDC_RESPONSE_MAX);
 	if (!response) {
-		if (ssl) { SSL_free(ssl); SSL_CTX_free(ssl_ctx); }
-		close(fd);
-		return NULL;
+		goto tls_fail;
 	}
 
 	size_t resp_len = 0;
-	if (ssl) {
-		ret = ssl_recv_all(ssl, response, OIDC_RESPONSE_MAX, &resp_len);
-		SSL_free(ssl);
-		SSL_CTX_free(ssl_ctx);
+	if (use_tls) {
+		ret = ssl_recv_all(&ssl, response, OIDC_RESPONSE_MAX, &resp_len);
 	} else {
 		/* Read until connection closes */
 		while (resp_len < OIDC_RESPONSE_MAX - 1) {
-			ssize_t n = recv(fd, response + resp_len, OIDC_RESPONSE_MAX - 1 - resp_len, 0);
+			ssize_t n = recv(fd, response + resp_len,
+			                 OIDC_RESPONSE_MAX - 1 - resp_len, 0);
 			if (n <= 0) break;
 			resp_len += n;
 		}
@@ -355,6 +420,13 @@ char *oidc_fetch_token(const char *token_endpoint_url,
 		ret = (resp_len > 0) ? 0 : -1;
 	}
 	close(fd);
+
+	/* 释放 mbedTLS 对象（ssl_setup 分配的内部资源随 ssl_free 释放） */
+	if (use_tls) {
+		mbedtls_ssl_free(&ssl);
+		mbedtls_ssl_config_free(&ssl_conf);
+		mbedtls_x509_crt_free(&ca_crt);
+	}
 
 	if (ret < 0) {
 		debug(LOG_ERR, "OIDC: failed to read response");
@@ -366,4 +438,14 @@ char *oidc_fetch_token(const char *token_endpoint_url,
 	char *token = extract_access_token(response);
 	free(response);
 	return token;
+
+tls_fail:
+	/* 握手/发送阶段失败：释放 TLS 对象并关闭连接 */
+	if (use_tls || url.is_https) {
+		mbedtls_ssl_free(&ssl);
+		mbedtls_ssl_config_free(&ssl_conf);
+		mbedtls_x509_crt_free(&ca_crt);
+	}
+	close(fd);
+	return NULL;
 }
