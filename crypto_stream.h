@@ -48,20 +48,22 @@ struct crypto_ctx *crypto_ctx_new_reader(const uint8_t *key);
 void crypto_ctx_free(struct crypto_ctx *ctx);
 
 /**
- * @brief Encrypt data in-place. Writer must call crypto_encrypt_init first.
+ * @brief Encrypt data in-place (writer must set up IV via crypto_ctx_new_writer)
  * @param ctx Writer context
  * @param data Data to encrypt (modified in-place)
  * @param len Length of data
- * @return 0 on success, -1 on error
+ * @return 0 on success, -1 on error. On failure the CFB stream state is
+ *         unrecoverable: the whole connection must be discarded, never retry.
  */
 int crypto_encrypt(struct crypto_ctx *ctx, uint8_t *data, size_t len);
 
 /**
- * @brief Decrypt data in-place. Reader must call crypto_decrypt_init first.
+ * @brief Decrypt data in-place (reader must set IV via crypto_set_iv first)
  * @param ctx Reader context
  * @param data Data to decrypt (modified in-place)
  * @param len Length of data
- * @return 0 on success, -1 on error
+ * @return 0 on success, -1 on error. On failure the CFB stream state is
+ *         unrecoverable: the whole connection must be discarded, never retry.
  */
 int crypto_decrypt(struct crypto_ctx *ctx, uint8_t *data, size_t len);
 

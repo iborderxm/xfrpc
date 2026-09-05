@@ -433,16 +433,19 @@ void handle_xdpi(struct proxy_client *client, struct bufferevent *bev, uint32_t 
  * @param client Proxy client with crypto contexts
  * @param src Source evbuffer (raw data)
  * @param dst Destination evbuffer (encrypted/compressed data)
+ * @return 0 on success; -1 if encryption failed — CFB stream state (iv/iv_off)
+ *         is then unrecoverable and the caller must tear down the proxy
+ *         connection. All input in src is discarded on failure.
  */
-static void crypto_encode_evbuffer(struct proxy_client *client,
-                                   struct evbuffer *src, struct evbuffer *dst)
+static int crypto_encode_evbuffer(struct proxy_client *client,
+                                  struct evbuffer *src, struct evbuffer *dst)
 {
 	size_t len = evbuffer_get_length(src);
-	if (len == 0) return;
+	if (len == 0) return 0;
 
 	/* Pull data into contiguous buffer */
 	uint8_t *data = evbuffer_pullup(src, len);
-	if (!data) return;
+	if (!data) return 0;
 
 	/* Compression: output may be larger than input */
 	size_t comp_len = 0;
@@ -473,13 +476,22 @@ static void crypto_encode_evbuffer(struct proxy_client *client,
 			evbuffer_add(dst, iv, 16);
 			crypto_writer_set_iv_sent(client->encrypt_ctx);
 		}
-		crypto_encrypt(client->encrypt_ctx, work_data, work_len);
+		/* 加密失败时 CFB 流状态（iv/iv_off）已破坏，缓冲区处于半加密状态，
+		 * 只能丢弃数据并让调用方关闭整条代理连接，不能重试。 */
+		if (crypto_encrypt(client->encrypt_ctx, work_data, work_len) != 0) {
+			debug(LOG_ERR, "Stream %u: AES-CFB encrypt failed, dropping %zu bytes",
+			      client->stream.id, work_len);
+			evbuffer_drain(src, len);
+			free(comp_data);
+			return -1;
+		}
 	}
 
 	evbuffer_add(dst, work_data, work_len);
 	evbuffer_drain(src, len);
 
 	free(comp_data);
+	return 0;
 }
 
 /**
@@ -491,38 +503,46 @@ static void crypto_encode_evbuffer(struct proxy_client *client,
  * @param client Proxy client with crypto contexts
  * @param src Source evbuffer (encrypted/compressed data)
  * @param dst Destination evbuffer (raw data)
+ * @return 0 on success; -1 if decryption failed — CFB stream state (iv/iv_off)
+ *         is then unrecoverable and the caller must tear down the proxy
+ *         connection. All input in src is discarded on failure.
  */
-static void crypto_decode_evbuffer(struct proxy_client *client,
-                                   struct evbuffer *src, struct evbuffer *dst)
+static int crypto_decode_evbuffer(struct proxy_client *client,
+                                  struct evbuffer *src, struct evbuffer *dst)
 {
 	size_t len = evbuffer_get_length(src);
-	if (len == 0) return;
+	if (len == 0) return 0;
 
 	/* Read IV on first call */
 	if (client->use_encryption && client->decrypt_ctx &&
 	    !crypto_reader_iv_received(client->decrypt_ctx)) {
-		if (len < 16) return; /* Need more data for IV */
+		if (len < 16) return 0; /* Need more data for IV */
 		uint8_t iv[16];
 		evbuffer_remove(src, iv, 16);
 		crypto_set_iv(client->decrypt_ctx, iv);
 		crypto_reader_set_iv_received(client->decrypt_ctx);
 		len -= 16;
-		if (len == 0) return;
+		if (len == 0) return 0;
 	}
 
 	/* Pull remaining data */
 	uint8_t *data = evbuffer_pullup(src, len);
-	if (!data) return;
+	if (!data) return 0;
 
 	/* Make a copy since we'll modify in-place */
 	uint8_t *work_data = malloc(len);
-	if (!work_data) return;
+	if (!work_data) return 0;
 	memcpy(work_data, data, len);
 	evbuffer_drain(src, len);
 
-	/* Decrypt */
+	/* 解密失败时 CFB 流状态已破坏且无法自恢复，丢弃数据并让调用方关闭连接 */
 	if (client->use_encryption && client->decrypt_ctx) {
-		crypto_decrypt(client->decrypt_ctx, work_data, len);
+		if (crypto_decrypt(client->decrypt_ctx, work_data, len) != 0) {
+			debug(LOG_ERR, "Stream %u: AES-CFB decrypt failed, dropping %zu bytes",
+			      client->stream.id, len);
+			free(work_data);
+			return -1;
+		}
 	}
 
 	/* Decompress */
@@ -536,7 +556,7 @@ static void crypto_decode_evbuffer(struct proxy_client *client,
 				evbuffer_add(dst, uncomp_data, out_len);
 				free(uncomp_data);
 				free(work_data);
-				return;
+				return 0;
 			}
 			free(uncomp_data);
 		}
@@ -544,6 +564,7 @@ static void crypto_decode_evbuffer(struct proxy_client *client,
 
 	evbuffer_add(dst, work_data, len);
 	free(work_data);
+	return 0;
 }
 
 void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
@@ -566,7 +587,14 @@ void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
 	if (client->use_encryption || client->use_compression) {
 		struct evbuffer *processed = evbuffer_new();
 		if (!processed) return;
-		crypto_encode_evbuffer(client, src, processed);
+		if (crypto_encode_evbuffer(client, src, processed) != 0) {
+			/* 加密流已损坏且无法恢复：丢弃数据并关闭该代理连接 */
+			evbuffer_free(processed);
+			debug(LOG_INFO, "Stream %u: crypto encode failed, closing proxy connection",
+			      client->stream.id);
+			del_proxy_client_by_stream_id(client->stream.id);
+			return;
+		}
 
 		if (!c_conf->tcp_mux) {
 			struct evbuffer *dst = bufferevent_get_output(client->ctl_bev);
@@ -648,7 +676,14 @@ void tcp_proxy_s2c_cb(struct bufferevent *bev, void *ctx)
 	if (client->use_encryption || client->use_compression) {
 		struct evbuffer *processed = evbuffer_new();
 		if (!processed) return;
-		crypto_decode_evbuffer(client, src, processed);
+		if (crypto_decode_evbuffer(client, src, processed) != 0) {
+			/* 解密流已损坏且无法恢复：丢弃数据并关闭该代理连接 */
+			evbuffer_free(processed);
+			debug(LOG_INFO, "Stream %u: crypto decode failed, closing proxy connection",
+			      client->stream.id);
+			del_proxy_client_by_stream_id(client->stream.id);
+			return;
+		}
 
 		struct evbuffer *dst = bufferevent_get_output(client->local_proxy_bev);
 		evbuffer_add_buffer(dst, processed);
