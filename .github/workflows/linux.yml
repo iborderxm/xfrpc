@@ -148,7 +148,9 @@ jobs:
           ./configure --prefix=$SYSROOT --libdir=$SYSROOT/lib --includedir=$SYSROOT/include
         # 只构建静态/动态库本体，跳过 example/minigzip 测试示例程序
         make -j$(nproc) libz.a libz.so.1.3.1
-        make install-libs install-headers
+        # zlib 1.3.1 无独立 install-headers 目标：头文件安装内联在 install 里
+        # （install: install-libs），且不依赖 all，不会触发示例程序构建
+        make install
         cd ..
         echo -e "\n\033[32m✓ zlib 编译完成（静态 + 动态）\033[0m"
         ls -lh $SYSROOT/lib/libz.a $SYSROOT/lib/libz.so*
