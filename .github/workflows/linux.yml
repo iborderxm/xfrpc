@@ -86,6 +86,9 @@ jobs:
           os: ubuntu-latest
           URL: mipsel-linux-muslsf
           ARCH_FLAG: linux-mips32
+          # 目标设备（xfp301m 等厂商固件）musl 加载器路径无 -sf 后缀，
+          # 与 muslsf 工具链默认的 /lib/ld-musl-mipsel-sf.so.1 不同，需显式指定
+          LOADER: /lib/ld-musl-mipsel.so.1
 
         # - target: mips-linux-musl
         #   os: ubuntu-latest
@@ -258,6 +261,12 @@ jobs:
         # zlib / mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
         COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
         COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections -Wl,-rpath,\$ORIGIN"
+        # 仅当 matrix 显式配置 LOADER 时才覆盖动态加载器路径
+        # （目标设备加载器命名与工具链默认 PT_INTERP 不一致时使用，如 xfp301m）
+        LOADER="${{ matrix.LOADER }}"
+        if [ -n "$LOADER" ]; then
+          COMMON_LDFLAGS="$COMMON_LDFLAGS -Wl,--dynamic-linker=$LOADER"
+        fi
 
         cmake \
           -DCMAKE_C_COMPILER=$CC \
