@@ -265,6 +265,7 @@ jobs:
           -DMBEDTLS_LIBRARY=$SYSROOT/lib/libmbedtls.a \
           -DMBEDX509_LIBRARY=$SYSROOT/lib/libmbedx509.a \
           -DMBEDCRYPTO_LIBRARY=$SYSROOT/lib/libmbedcrypto.a \
+          -DDEBUG=ON \
           ..
 
         make -j$(nproc)
