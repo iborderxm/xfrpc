@@ -763,26 +763,18 @@ static int incr_send_window(struct bufferevent *bev,
 
     uint32_t increment = ntohl(tmux_hdr->length);
 
-    if (increment > MAX_STREAM_WINDOW_SIZE) {
-        debug(LOG_ERR, "Stream %d: WINDOW_UPDATE increment %u exceeds maximum %u",
-              stream_id, increment, MAX_STREAM_WINDOW_SIZE);
-        return 0;
-    }
-
+    /* WINDOW_UPDATE 增量是对端广告的发送额度，接受它本身不占用本端内存。
+     * frps 建流后会一次性把窗口补足到其配置的每流窗口（可达数 MB），
+     * 因此不能按本端窗口上限拒绝增量（误判为协议错误会导致断连）。
+     * 本端内存限制靠对 send_window 做饱和加法封顶：
+     * min(MAX_STREAM_WINDOW_SIZE, MAX_YAMUX_WINDOW_SIZE)，
+     * 在途数据永远不会超过该上限 */
+    uint32_t cap = MIN(MAX_STREAM_WINDOW_SIZE, MAX_YAMUX_WINDOW_SIZE);
     uint32_t old_window = stream->send_window;
-    if (stream->send_window > MAX_STREAM_WINDOW_SIZE - increment) {
-        debug(LOG_WARNING, "Stream %d: send_window would overflow, capping at %u",
-              stream_id, MAX_STREAM_WINDOW_SIZE);
-        stream->send_window = MAX_STREAM_WINDOW_SIZE;
-    } else {
+    if (increment >= cap || stream->send_window >= cap - increment)
+        stream->send_window = cap;
+    else
         stream->send_window += increment;
-    }
-
-    if (stream->send_window > MAX_YAMUX_WINDOW_SIZE) {
-        debug(LOG_DEBUG, "Stream %u: capping send_window %u to MAX_YAMUX_WINDOW_SIZE %u",
-              stream_id, stream->send_window, MAX_YAMUX_WINDOW_SIZE);
-        stream->send_window = MAX_YAMUX_WINDOW_SIZE;
-    }
 
     debug(LOG_DEBUG, "WUP recv stream=%u inc=%u sw %u->%u",
           stream_id, increment, old_window, stream->send_window);
