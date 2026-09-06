@@ -46,17 +46,16 @@ static mbedtls_ctr_drbg_context g_ctr_drbg;
 static int g_rng_inited = 0;
 
 /**
- * CTR_DRBG 熵源回调（mbedTLS f_entropy 签名）：
+ * CTR_DRBG 熵源回调（mbedtls_ctr_drbg_seed 的 f_entropy 签名：
+ * 三参数、无 olen 出参，须填满 len 字节）。
  * 用原始系统调用读取 /dev/urandom，不经 stdio，
  * 失败时记录精确 errno 便于现场设备定位。
  *
  * @return 0 成功，MBEDTLS_ERR_ENTROPY_SOURCE_FAILED 表示读取失败
  */
-static int urandom_entropy_poll(void *data, unsigned char *output,
-				size_t len, size_t *olen)
+static int urandom_entropy_poll(void *data, unsigned char *output, size_t len)
 {
 	(void)data;
-	*olen = 0;
 
 	int fd = open("/dev/urandom", O_RDONLY);
 	if (fd < 0) {
@@ -64,15 +63,16 @@ static int urandom_entropy_poll(void *data, unsigned char *output,
 		return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
 	}
 
-	while (*olen < len) {
-		ssize_t r = read(fd, output + *olen, len - *olen);
+	size_t got = 0;
+	while (got < len) {
+		ssize_t r = read(fd, output + got, len - got);
 		if (r <= 0) {
 			debug(LOG_ERR, "read /dev/urandom failed: r=%d errno=%d",
 			      (int)r, errno);
 			close(fd);
 			return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
 		}
-		*olen += (size_t)r;
+		got += (size_t)r;
 	}
 
 	close(fd);
