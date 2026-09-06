@@ -29,6 +29,7 @@
 #include "xtcp_client.h"
 #include "control.h"
 #include "crypto.h"
+#include "commandline.h"
 #include "utils.h"
 #include "common.h"
 #include "login.h"
@@ -743,12 +744,56 @@ static void check_server_timeout(time_t current_time) {
  * @note The function uses global state to track connection status and timing
  * @note If getting current time fails, the function returns early without timeout check
  */
+/**
+ * @brief Logs process memory and per-stream buffer statistics.
+ *
+ * 心跳周期打印进程 RSS/VSZ、存活流与 client 数、控制连接收发积压，
+ * 配合 log_proxy_client_stats() 定位内存增长问题：
+ * - RSS 随 client/流数同步增长   → 断开清理泄漏
+ * - RSS 增长但 client 数稳定     → 某处 evbuffer/堆未释放
+ * - RSS 高位但不增（断开后平台） → musl 分配器保留，非泄漏
+ */
+static void log_memory_stats(void)
+{
+	if (!get_mem_monitor_status())
+		return;
+
+	unsigned long vsize_kb = 0, rss_kb = 0;
+	FILE *f = fopen("/proc/self/status", "r");
+	if (f) {
+		char line[256];
+		while (fgets(line, sizeof(line), f)) {
+			if (!strncmp(line, "VmSize:", 7))
+				sscanf(line + 7, "%lu", &vsize_kb);
+			else if (!strncmp(line, "VmRSS:", 6))
+				sscanf(line + 6, "%lu", &rss_kb);
+		}
+		fclose(f);
+	}
+
+	struct control *mc = get_main_control();
+	size_t ctl_in = 0, ctl_out = 0;
+	if (mc && mc->connect_bev) {
+		ctl_in = evbuffer_get_length(bufferevent_get_input(mc->connect_bev));
+		ctl_out = evbuffer_get_length(bufferevent_get_output(mc->connect_bev));
+	}
+
+	debug(LOG_INFO,
+		  "[MEMSTAT] VmSize=%lukB VmRSS=%lukB streams=%d ctl_in=%zu ctl_out=%zu",
+		  vsize_kb, rss_kb, tmux_get_stream_count(), ctl_in, ctl_out);
+
+	log_proxy_client_stats();
+}
+
 static void heartbeat_handler(evutil_socket_t fd, short event, void *arg) {
 	// Send ping if client is connected
 	if (is_xfrpc_connected()) {
 		debug(LOG_INFO, "Sending heartbeat ping to server");
 		ping();
 	}
+
+	// Periodic memory statistics for leak diagnosis
+	log_memory_stats();
 
 	// Reschedule next heartbeat
 	schedule_heartbeat_timer(main_ctl->ticker_ping);
@@ -1384,6 +1429,18 @@ static void handle_tcp_mux(struct bufferevent *bev, int len, void *ctx)
 						cur = &abandon_stream;
 					else
 						continue;
+				}
+
+				if (stream_len == 0) {
+					/* 零长 DATA 帧：仅携带 FIN/RST 等标志（流关闭控制帧）。
+					 * 必须立即处理标志，否则会落入下方 "Unexpected type"
+					 * 错误分支；若此时缓冲区已排空还会卡死整个解析器 */
+					if (cur != &abandon_stream) {
+						debug(LOG_DEBUG, "[TMUX] zero-length DATA frame: stream=%u flags=0x%x",
+							  stream_id, ntohs(tmux_hdr.flags));
+						tmux_stream_process_flags(ntohs(tmux_hdr.flags), cur);
+					}
+					continue;
 				}
 
 				if (len == 0) {

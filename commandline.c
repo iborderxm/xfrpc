@@ -31,9 +31,11 @@ static void usage(const char *appname);
 /* Global configuration variables */
 static struct {
     int is_daemon;
+    int mem_monitor;
     char *config_file;
 } g_config = {
     .is_daemon = 1,
+    .mem_monitor = 0,
     .config_file = NULL
 };
 
@@ -53,6 +55,7 @@ static void sighup_handler(int signo)
 /* Accessor macros/inline functions */
 #define IS_DAEMON() (g_config.is_daemon)
 #define GET_CONFIG_FILE() (g_config.config_file)
+#define MEM_MONITOR() (g_config.mem_monitor)
 
 /*
  * Creates a daemon process by performing the standard Unix double-fork.
@@ -129,10 +132,19 @@ static signal_func *set_signal_handler(int signo, signal_func *func) {
     return old_action.sa_handler;
 }
 
-int 
+int
 get_daemon_status()
 {
     return IS_DAEMON();
+}
+
+/**
+ * Returns whether periodic memory statistics logging is enabled (-m flag).
+ */
+int
+get_mem_monitor_status(void)
+{
+    return MEM_MONITOR();
 }
 
 /**
@@ -153,6 +165,7 @@ static void usage(const char *appname)
         {"-f",           "Run in foreground (don't daemonize)"},
         {"-d <level>",   "Set debug level"},
         {"-s",           "Enable syslog for debug logging"},
+        {"-m",           "Enable periodic memory statistics logging"},
         {"-h",           "Display this help message"},
         {"-v",           "Display version information"},
         {"-r",           "Display client run ID"}
@@ -181,7 +194,7 @@ void parse_commandline(int argc, char **argv)
     int c;
     int config_specified = 0;
 
-    while (-1 != (c = getopt(argc, argv, "c:hfd:svr"))) {
+    while (-1 != (c = getopt(argc, argv, "c:hfd:svmr"))) {
         switch (c) {
             case 'h':
                 usage(argv[0]);
@@ -212,6 +225,10 @@ void parse_commandline(int argc, char **argv)
                 
             case 's':
                 debugconf.log_syslog = 1;
+                break;
+
+            case 'm':
+                g_config.mem_monitor = 1;
                 break;
 
             case 'v':

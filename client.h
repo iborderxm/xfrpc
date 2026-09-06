@@ -184,6 +184,7 @@ int is_uds_proxy(const struct proxy_service *ps);
 int has_service_type(const struct proxy_service *ps);
 struct proxy_client *new_proxy_client(void);
 void clear_all_proxy_client(void);
+void log_proxy_client_stats(void);
 void xfrp_proxy_event_cb(struct bufferevent *bev, short what, void *ctx);
 int xdpi_engine(struct proxy_client *client, const unsigned char *data, size_t len);
 

@@ -21,6 +21,12 @@ void parse_commandline(int argc, char **argv);
 int get_daemon_status(void);
 
 /**
+ * @brief Returns whether periodic memory statistics logging is enabled (-m flag)
+ * @return 1 if enabled, 0 otherwise
+ */
+int get_mem_monitor_status(void);
+
+/**
  * @brief Returns the path to the configuration file.
  * @return Pointer to config file path (do not free)
  */

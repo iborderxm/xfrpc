@@ -582,6 +582,41 @@ void del_proxy_client_by_stream_id(uint32_t sid) {
 }
 
 /**
+ * @brief Logs per-client memory-relevant statistics (for leak diagnosis).
+ *
+ * 逐条打印每个存活 proxy_client 的流状态与各 evbuffer 积压量，
+ * 用于定位"内存持续增长/断开后不释放"问题：
+ * - count 持续增长  → 断开清理路径泄漏（流/client 未删除）
+ * - count 稳定但积压增长 → 背压失效，数据滞留在 evbuffer
+ */
+void log_proxy_client_stats(void)
+{
+	if (!all_pc) {
+		debug(LOG_DEBUG, "[MEMSTAT] no alive proxy clients");
+		return;
+	}
+
+	int count = HASH_CNT(hh, all_pc);
+	debug(LOG_INFO, "[MEMSTAT] alive proxy clients: %d", count);
+
+	struct proxy_client *pc, *tmp;
+	HASH_ITER(hh, all_pc, pc, tmp) {
+		size_t pending_len = pc->pending_encoded ?
+			evbuffer_get_length(pc->pending_encoded) : 0;
+		size_t local_out = pc->local_proxy_bev ?
+			evbuffer_get_length(bufferevent_get_output(pc->local_proxy_bev)) : 0;
+		size_t local_in = pc->local_proxy_bev ?
+			evbuffer_get_length(bufferevent_get_input(pc->local_proxy_bev)) : 0;
+
+		debug(LOG_INFO,
+			  "[MEMSTAT] stream=%u state=%d rw=%u sw=%u pending=%zu local_in=%zu local_out=%zu",
+			  pc->stream.id, pc->stream.state,
+			  pc->stream.recv_window, pc->stream.send_window,
+			  pending_len, local_in, local_out);
+	}
+}
+
+/**
  * @brief Retrieves a proxy client by its stream ID
  */
 struct proxy_client *get_proxy_client(uint32_t sid)

@@ -581,6 +581,19 @@ void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
 		return;
 
 	struct tmux_stream *stream = &client->stream;
+	size_t backlog = evbuffer_get_length(bufferevent_get_output(bev));
+
+	/* 对端已 FIN：本地 output 排空后立即半关闭本地连接（发 EOF 给本地服务），
+	 * 否则本地服务（SSH/nginx 等）会无限等待，client 也无法走删除流程 */
+	if (stream->state == REMOTE_CLOSE) {
+		if (backlog == 0) {
+			evutil_socket_t fd = bufferevent_getfd(bev);
+			if (fd >= 0)
+				shutdown(fd, SHUT_WR);
+		}
+		return;
+	}
+
 	/* 流已进入关闭/复位状态后不再补发窗口更新 */
 	if (stream->state >= LOCAL_CLOSE)
 		return;
@@ -588,8 +601,28 @@ void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
 	if (stream->recv_window >= MAX_STREAM_WINDOW_SIZE)
 		return;
 
-	tmux_stream_replenish_window(client->ctl_bev, stream,
-	                             evbuffer_get_length(bufferevent_get_output(bev)));
+	tmux_stream_replenish_window(client->ctl_bev, stream, backlog);
+}
+
+/**
+ * @brief Propagates peer FIN (REMOTE_CLOSE) to the local connection.
+ *
+ * 对端不再发送（s2c 结束）后，将本地 socket 半关闭（SHUT_WR），
+ * 使本地服务读到 EOF 并尽快走关闭→删除流程，避免空闲连接
+ * 永久滞留造成内存泄漏。output 尚有积压时推迟到 write 回调处理。
+ */
+void tcp_proxy_notify_remote_close(struct proxy_client *client)
+{
+	if (!client || !client->local_proxy_bev)
+		return;
+	if (client->stream.state != REMOTE_CLOSE)
+		return;
+	if (evbuffer_get_length(bufferevent_get_output(client->local_proxy_bev)) > 0)
+		return; /* 积压未排空，由 write 回调在排空后执行半关闭 */
+
+	evutil_socket_t fd = bufferevent_getfd(client->local_proxy_bev);
+	if (fd >= 0)
+		shutdown(fd, SHUT_WR);
 }
 
 /**

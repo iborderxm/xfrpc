@@ -208,9 +208,19 @@ void del_stream(uint32_t stream_id);
 void clear_stream();
 
 /**
- * @brief Retrieves a tmux stream by its ID.
+ * @brief Retrieves a stream by its ID.
  */
 struct tmux_stream *get_stream_by_id(uint32_t id);
+
+/**
+ * @brief Returns the number of alive streams (for memory diagnosis).
+ */
+int tmux_get_stream_count(void);
+
+/**
+ * @brief Processes SYN/ACK/FIN/RST flags for a zero-length control frame.
+ */
+int tmux_stream_process_flags(uint16_t flags, struct tmux_stream *stream);
 
 /**
  * @brief Closes a tmux stream.

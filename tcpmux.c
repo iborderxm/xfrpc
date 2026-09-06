@@ -136,6 +136,23 @@ struct tmux_stream *get_stream_by_id(uint32_t id) {
 }
 
 /**
+ * @brief Returns the number of alive streams (for memory diagnosis).
+ */
+int tmux_get_stream_count(void) {
+    return all_stream ? (int)HASH_COUNT(all_stream) : 0;
+}
+
+/**
+ * @brief Processes SYN/ACK/FIN/RST flags for a zero-length control frame.
+ *
+ * 对端可能以 length=0 的 DATA/WUP 帧携带 FIN/RST（流关闭控制帧），
+ * 供 mux 帧解析层直接调用。
+ */
+int tmux_stream_process_flags(uint16_t flags, struct tmux_stream *stream) {
+    return process_flags(flags, stream);
+}
+
+/**
  * @brief Retrieves the current tmux stream.
  */
 struct tmux_stream *get_cur_stream() {
@@ -697,6 +714,10 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
     if (!get_stream_by_id(stream_id))
         return length;
 
+    /* 对端 FIN（REMOTE_CLOSE）：向本地连接传播 EOF，尽快走关闭清理 */
+    if (pc)
+        tcp_proxy_notify_remote_close(pc);
+
     struct bufferevent *bout = get_main_control()->connect_bev;
     if (bytes_processed != length) {
         debug(LOG_ERR,
@@ -760,6 +781,10 @@ static int incr_send_window(struct bufferevent *bev,
         debug(LOG_DEBUG, "Stream %d no longer exists", stream_id);
         return 1;
     }
+
+    /* WUP 帧携带的 FIN/RST 已由 process_flags 处理：
+     * 对端 FIN（REMOTE_CLOSE）时向本地连接传播 EOF */
+    tcp_proxy_notify_remote_close(get_proxy_client(stream_id));
 
     uint32_t increment = ntohl(tmux_hdr->length);
 
