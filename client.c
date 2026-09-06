@@ -185,6 +185,24 @@ void handle_proxy_disconnect(struct proxy_client *client,
 }
 
 /**
+ * @brief Reads the pending socket error (SO_ERROR) from the connection fd.
+ *
+ * libevent 通过事件回调上报连接/套接字错误（内部取 SO_ERROR），
+ * 不会设置全局 errno。若不主动读取，断开日志里的 strerror(errno)
+ * 只会打印陈旧值——典型如非阻塞 connect() 留下的 EINPROGRESS
+ * （"Operation in progress"），掩盖真实原因（ECONNREFUSED 等）。
+ */
+static int get_sock_error(struct bufferevent *bev)
+{
+	int so_err = 0;
+	socklen_t len = sizeof(so_err);
+	evutil_socket_t fd = bufferevent_getfd(bev);
+	if (fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, (void *)&so_err, &len) == 0)
+		return so_err;
+	return 0;
+}
+
+/**
  * @brief Event callback for proxy connection events
  */
 void xfrp_proxy_event_cb(struct bufferevent *bev, short what, void *ctx) {
@@ -201,8 +219,27 @@ void xfrp_proxy_event_cb(struct bufferevent *bev, short what, void *ctx) {
 		} else {
 			error_msg = "server";
 		}
+		/* 取回真实 socket 错误并写入 errno，使下游断开日志的
+		 * strerror(errno) 打印真实原因而非陈旧的 EINPROGRESS；
+		 * EOF（对端正常关闭）时 so_error 为 0，保留原 errno */
+		int so_err = (what & BEV_EVENT_ERROR) ? get_sock_error(bev) : 0;
+		debug(LOG_INFO,
+		      "Local conn event: what=0x%x [%s%s%s%s] so_error=%d(%s) "
+		      "connected=%d stream_id=%d",
+		      what,
+		      (what & BEV_EVENT_CONNECTED) ? "CONNECTED " : "",
+		      (what & BEV_EVENT_EOF) ? "EOF " : "",
+		      (what & BEV_EVENT_ERROR) ? "ERROR " : "",
+		      (what & BEV_EVENT_TIMEOUT) ? "TIMEOUT" : "",
+		      so_err, so_err ? strerror(so_err) : "none",
+		      client->connected, client->stream_id);
+		if (so_err)
+			errno = so_err;
 		handle_proxy_disconnect(client, bev, error_msg);
 	} else if (what & BEV_EVENT_CONNECTED) {
+		/* 维护本地 TCP 握手完成标志（用于事后判断断开发生在
+		 * 建连前还是建连后） */
+		client->connected = 1;
 		debug(LOG_DEBUG, "Client %d connected", client->stream_id);
 		/* Set TCP_NODELAY on local proxy socket to reduce latency for
 		 * interactive protocols (SOCKS5, SSH, RDP) and small-packet

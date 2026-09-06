@@ -1072,8 +1072,13 @@ int data_len = (int)msg_hton(msg->length);
         return;
     }
 
+    /* 记录 stream_id：setup_local_connection 失败路径会同步删除 client
+     * （free_proxy_client），此后 client 指针悬空，禁止再解引用 */
+    uint32_t sid = client->stream_id;
     start_xfrp_tunnel(client);
-    set_client_work_start(client, 1);
+    /* 仅当 client 未被删除时才更新 work_started，避免 UAF */
+    if (get_proxy_client(sid) == client)
+        set_client_work_start(client, 1);
     SAFE_FREE(sr);
 }
 
