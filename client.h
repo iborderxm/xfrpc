@@ -100,6 +100,11 @@ struct proxy_client {
 	int                 use_compression;
 	struct crypto_ctx   *encrypt_ctx;   /* AES-128-CFB writer context */
 	struct crypto_ctx   *decrypt_ctx;   /* AES-128-CFB reader context */
+
+	/* tcp_mux 下已被编码（加密/压缩）但因 send_window 耗尽而滞留待发的数据。
+	 * 滞留数据绝不能放回本地连接的 input 重新走编码路径（会二次加密），
+	 * 待 WINDOW_UPDATE 重新打开窗口后由 tcp_proxy_flush_pending() 补发 */
+	struct evbuffer     *pending_encoded;
 };
 
 struct proxy_service {

@@ -9,9 +9,9 @@
 #include "uthash.h"
 #include <stdint.h>
 
-#define MAX_STREAM_WINDOW_SIZE (8 * 1024 * 1024)  // 8MB to match frps server
-#define MAX_YAMUX_WINDOW_SIZE  (6 * 1024 * 1024)  // 6MB to match frps MaxStreamWindowSize
-#define DEFAULT_MAX_FRAME_SIZE (256 * 1024)         // 32KB max frame size (matches yamux/smux)
+#define MAX_STREAM_WINDOW_SIZE (512 * 1024)  // 512KB to match frps server
+#define MAX_YAMUX_WINDOW_SIZE  (512 * 1024)  // 512KB to match frps MaxStreamWindowSize
+#define DEFAULT_MAX_FRAME_SIZE (128 * 1024)         // 128KB max frame size (matches yamux/smux)
 
 enum go_away_type {
     NORMAL,
@@ -90,6 +90,22 @@ int validate_tcp_mux_protocol(struct tcp_mux_header *tmux_hdr);
  */
 void send_window_update(struct bufferevent *bout, struct tmux_stream *stream,
                         uint32_t length);
+
+/**
+ * @brief Backpressure-aware receive window replenishment (s2c direction).
+ *
+ * 只在 (本地 output 积压 + 未归还窗口) 允许的范围内归还窗口额度，
+ * 维持不变式：backlog + recv_window <= MAX_STREAM_WINDOW_SIZE，
+ * 防止对端无限灌入数据导致进程内存持续增长。
+ * 积压排空后的补发由本地连接的 write 回调触发。
+ *
+ * @param bout    Control bufferevent 用于发送 WINDOW_UPDATE
+ * @param stream  目标流
+ * @param backlog 当前本地连接 output evbuffer 积压字节数
+ */
+void tmux_stream_replenish_window(struct bufferevent *bout,
+                                  struct tmux_stream *stream,
+                                  size_t backlog);
 
 /**
  * @brief Sends a TCP MUX window update message with SYN flag.

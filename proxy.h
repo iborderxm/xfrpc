@@ -34,6 +34,18 @@ void free_proxy_obj(struct proxy *p);
 void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx);
 void tcp_proxy_s2c_cb(struct bufferevent *bev, void *ctx);
 
+/* 本地连接 write 回调：s2c 积压排空后补发滞留的 WINDOW_UPDATE（背压恢复） */
+void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx);
+
+/* 冲刷滞留的已编码（加密/压缩）数据。
+ * 返回 0：无滞留或已全部发出；1：窗口仍耗尽；-1：流错误且 client 已释放 */
+int tcp_proxy_flush_pending(struct proxy_client *client);
+
+/* 对 src 中的原始数据做压缩+加密后写入 dst（供断开冲刷等复用）。
+ * 返回 0 成功；-1 加密失败（CFB 流状态不可恢复，须关闭代理连接） */
+int crypto_encode_evbuffer(struct proxy_client *client,
+                           struct evbuffer *src, struct evbuffer *dst);
+
 // UDP proxy callbacks
 void udp_proxy_c2s_cb(struct bufferevent *bev, void *ctx);
 void udp_proxy_s2c_cb(struct bufferevent *bev, void *ctx);

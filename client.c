@@ -111,18 +111,52 @@ static void handle_proxy_disconnect(struct proxy_client *client,
 			struct evbuffer *dst = bufferevent_get_output(client->ctl_bev);
 			evbuffer_add_buffer(dst, src);
 		} else {
-			while (evbuffer_get_length(src) > 0) {
-				int written = tmux_stream_write(client->ctl_bev, src, &client->stream);
-				if (written < 0) {
-					debug(LOG_INFO, "Stream %d: tmux_stream_write error %d during flush, aborting",
-						  client->stream.id, written);
-					break;
+			/* 先冲刷滞留的已编码数据，保证流内字节顺序（新数据后于旧数据） */
+			if ((client->use_encryption || client->use_compression) &&
+			    tcp_proxy_flush_pending(client) < 0)
+				return; /* 流错误且 client/本地 bev 已释放，禁止再访问 */
+
+			if (client->use_encryption || client->use_compression) {
+				/* 加密/压缩流：断开冲刷的数据同样必须先编码，
+				 * 否则密文流中混入明文会导致对端解密失败 */
+				struct evbuffer *processed = evbuffer_new();
+				if (!processed) {
+					debug(LOG_ERR, "Stream %d: alloc failed during disconnect flush",
+					      client->stream.id);
+				} else if (crypto_encode_evbuffer(client, src, processed) != 0) {
+					debug(LOG_INFO, "Stream %d: encode failed during disconnect flush",
+					      client->stream.id);
+					evbuffer_free(processed);
+				} else {
+					while (evbuffer_get_length(processed) > 0) {
+						int written = tmux_stream_write(client->ctl_bev,
+						                                processed,
+						                                &client->stream);
+						if (written <= 0) {
+							/* 窗口耗尽：剩余编码数据并入滞留队列，
+							 * 由后续 WINDOW_UPDATE 冲刷后关闭 */
+							if (written == 0 && client->pending_encoded)
+								evbuffer_add_buffer(client->pending_encoded,
+								                    processed);
+							break;
+						}
+					}
+					evbuffer_free(processed);
 				}
-				if (written == 0) {
-					/* send_window == 0: can't send more right now */
-					debug(LOG_INFO, "%zu bytes unsent, send_window exhausted",
-						  evbuffer_get_length(src));
-					break;
+			} else {
+				while (evbuffer_get_length(src) > 0) {
+					int written = tmux_stream_write(client->ctl_bev, src, &client->stream);
+					if (written < 0) {
+						debug(LOG_INFO, "Stream %d: tmux_stream_write error %d during flush, aborting",
+						      client->stream.id, written);
+						break;
+					}
+					if (written == 0) {
+						/* send_window == 0: can't send more right now */
+						debug(LOG_INFO, "%zu bytes unsent, send_window exhausted",
+						      evbuffer_get_length(src));
+						break;
+					}
 				}
 			}
 		}
@@ -374,6 +408,13 @@ void start_xfrp_tunnel(struct proxy_client *client)
 		debug(LOG_INFO, "Proxy [%s] compression enabled (zlib)", ps->proxy_name);
 	}
 
+	/* tcp_mux 下因 send_window 耗尽而滞留的已编码数据队列 */
+	if (client->use_encryption || client->use_compression) {
+		client->pending_encoded = evbuffer_new();
+		if (!client->pending_encoded)
+			debug(LOG_ERR, "Failed to create pending_encoded buffer");
+	}
+
 	if (setup_local_connection(client) <= 0) {
 		return;
 	}
@@ -392,8 +433,11 @@ void start_xfrp_tunnel(struct proxy_client *client)
 	}
 
 	bufferevent_setwatermark(client->local_proxy_bev, EV_READ, 0, 0);
+	/* EV_WRITE 低水位：本地 output 积压降到阈值以下时触发 write 回调，
+	 * 用于补发背压期间滞留的 WINDOW_UPDATE（s2c 背压恢复） */
+	bufferevent_setwatermark(client->local_proxy_bev, EV_WRITE, 256 * 1024, 0);
 
-	bufferevent_setcb(client->local_proxy_bev, proxy_c2s_recv, NULL,
+	bufferevent_setcb(client->local_proxy_bev, proxy_c2s_recv, tcp_proxy_local_write_cb,
 					 xfrp_proxy_event_cb, client);
 	bufferevent_enable(client->local_proxy_bev, EV_READ|EV_WRITE);
 }
@@ -471,6 +515,12 @@ free_proxy_client(struct proxy_client *client)
 	if (client->xdpi_buf) {
 		free(client->xdpi_buf);
 		client->xdpi_buf = NULL;
+	}
+
+	/* Free pending already-encoded data queue */
+	if (client->pending_encoded) {
+		evbuffer_free(client->pending_encoded);
+		client->pending_encoded = NULL;
 	}
 
 	/* Free encryption contexts */

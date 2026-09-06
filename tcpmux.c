@@ -166,8 +166,8 @@ void init_tmux_stream(struct tmux_stream *stream, uint32_t id, enum tcp_mux_stat
 
     stream->id = id;
     stream->state = state;
-    stream->recv_window = MAX_STREAM_WINDOW_SIZE;  // 8MB
-    stream->send_window = 256 * 1024;  // 256KB initial (matches yamux initialStreamWindow)
+    stream->recv_window = MAX_STREAM_WINDOW_SIZE;  // 512KB
+    stream->send_window = 128 * 1024;  // 128KB initial (matches yamux initialStreamWindow)
 
     add_stream(stream);
     debug(LOG_DEBUG, "Initialized stream %u with state %d", id, state);
@@ -543,10 +543,55 @@ void send_window_update(struct bufferevent *bout, struct tmux_stream *stream, ui
 }
 
 /**
+ * @brief Backpressure-aware receive window replenishment (s2c direction).
+ *
+ * 维持不变式：本地 output 积压 + recv_window <= MAX_STREAM_WINDOW_SIZE。
+ * 只有当当前窗口额度低于该上限允许的额度时才补发 WINDOW_UPDATE，
+ * 且归还的 delta 不会超过已消费但未归还的字节（诚实记账，
+ * recv_window 始终与对端实际可用窗口保持一致）。
+ */
+void tmux_stream_replenish_window(struct bufferevent *bout,
+                                  struct tmux_stream *stream,
+                                  size_t backlog)
+{
+    if (!bout || !stream)
+        return;
+
+    /* 已消费但尚未归还给对端的窗口额度 */
+    uint32_t withheld = 0;
+    if (stream->recv_window < MAX_STREAM_WINDOW_SIZE)
+        withheld = MAX_STREAM_WINDOW_SIZE - stream->recv_window;
+    if (withheld == 0)
+        return;
+
+    /* 积压超过窗口上限时不再归还任何额度，等待积压排空（write 回调补发） */
+    if (backlog >= MAX_STREAM_WINDOW_SIZE)
+        return;
+
+    uint32_t target = MAX_STREAM_WINDOW_SIZE - (uint32_t)backlog;
+    if (stream->recv_window >= target)
+        return; /* 现有额度已足够，无需补发 */
+
+    uint32_t delta = target - stream->recv_window;
+    if (delta > withheld)
+        delta = withheld; /* 只能归还已消费的字节 */
+    if (delta == 0)
+        return;
+
+    stream->recv_window += delta;
+    tcp_mux_send_win_update(bout, get_send_flags(stream), stream->id, delta);
+    debug(LOG_DEBUG, "WUP replenish stream=%u delta=%u backlog=%zu rw=%u",
+          stream->id, delta, backlog, stream->recv_window);
+}
+
+/**
  * @brief Processes data from a tmux TMUX_DATA frame and dispatches to protocol handlers.
  *
  * Reads the payload directly from the control bev (no intermediate ring buffer)
  * and dispatches to the appropriate protocol handler.
+ *
+ * 契约：除参数非法外，本函数总是消费（转发或丢弃）完整的 @p length 字节
+ * payload 并返回 @p length，保证 handle_tcp_mux 的帧解析与缓冲区保持对齐。
  */
 int process_data(struct bufferevent *bev, struct tmux_stream *stream,
                  uint32_t length, uint16_t flags,
@@ -557,21 +602,32 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
     }
 
     uint32_t stream_id = stream->id;
+    struct evbuffer *src = bufferevent_get_input(bev);
 
     if (!process_flags(flags, stream)) {
         debug(LOG_ERR, "Failed to process flags for stream %d", stream_id);
-        return 0;
+        /* 丢弃 payload 保持帧对齐 */
+        evbuffer_drain(src, length);
+        return length;
     }
 
+    /* process_flags 处理 FIN/RST 时可能已释放该流（stream 内嵌于
+     * proxy_client），此后禁止再解引用 stream/pc，仅使用 stream_id 值拷贝 */
     if (!get_stream_by_id(stream_id)) {
         debug(LOG_DEBUG, "Stream %d no longer exists", stream_id);
+        evbuffer_drain(src, length);
         return length;
     }
 
     if (length > stream->recv_window) {
         debug(LOG_ERR, "Receive window exceeded (available: %u, requested: %u)",
               stream->recv_window, length);
-        return 0;
+        evbuffer_drain(src, length);
+        stream->state = RESET;
+        tcp_mux_send_win_update_rst(get_main_control()->connect_bev, stream_id);
+        /* 协议违规：复位并清理客户端，防止残留 */
+        del_proxy_client_by_stream_id(stream_id);
+        return length;
     }
 
     stream->recv_window -= length;
@@ -584,7 +640,11 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
         uint8_t *data = calloc(length + 1, sizeof(uint8_t));
         if (!data) {
             debug(LOG_ERR, "Memory allocation failed for data buffer");
-            return 0;
+            evbuffer_drain(src, length);
+            stream->state = RESET;
+            tcp_mux_send_win_update_rst(get_main_control()->connect_bev, stream_id);
+            del_proxy_client_by_stream_id(stream_id);
+            return length;
         }
 
         size_t nr = bufferevent_read(bev, data, length);
@@ -592,7 +652,11 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
             debug(LOG_ERR, "Stream %u: short read %zu/%u in default path",
                   stream_id, nr, length);
             free(data);
-            return 0;
+            evbuffer_drain(src, length - nr);
+            stream->state = RESET;
+            tcp_mux_send_win_update_rst(get_main_control()->connect_bev, stream_id);
+            del_proxy_client_by_stream_id(stream_id);
+            return length;
         }
 
         debug(LOG_DEBUG, "Stream %u: entering default callback path length=%u",
@@ -621,13 +685,17 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
         debug(LOG_DEBUG, "Stream %u: entering local proxy path length=%u local_proxy_bev=%p",
               stream_id, length, pc->local_proxy_bev);
 
-        struct evbuffer *src = bufferevent_get_input(bev);
         struct evbuffer *dst = bufferevent_get_output(pc->local_proxy_bev);
         bytes_processed = evbuffer_zc_transfer(src, dst, length);
 
         debug(LOG_DEBUG, "Stream %u: leaving local proxy path processed=%u/%u",
               stream_id, bytes_processed, length);
     }
+
+    /* 分发过程中可能已释放该流（如 StartWorkConn 建连失败触发
+     * del_proxy_client_by_stream_id），此时禁止再访问 stream/pc */
+    if (!get_stream_by_id(stream_id))
+        return length;
 
     struct bufferevent *bout = get_main_control()->connect_bev;
     if (bytes_processed != length) {
@@ -649,9 +717,21 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
               stream->recv_window,
               (pc && pc->ps && pc->ps->proxy_type) ? pc->ps->proxy_type : "null",
               (pc && pc->ps) ? pc->ps->service_type : -1);
+        /* 丢弃未消费的剩余 payload 保持帧对齐，再复位流 */
+        evbuffer_drain(src, length - bytes_processed);
         tcp_mux_send_win_update_rst(bout, stream->id);
         stream->state = LOCAL_CLOSE;
+    } else if (pc && pc->local_proxy_bev &&
+               !is_socks5_proxy(pc->ps) && !has_service_type(pc->ps)) {
+        /* 普通本地转发路径：背压感知的窗口归还。
+         * 本地 output 积压超过窗口上限时暂不归还额度（对端随之停止发送），
+         * 待积压被本地服务消费、write 回调触发后再补发 WINDOW_UPDATE，
+         * 避免积压在进程内存中无上限增长 */
+        tmux_stream_replenish_window(bout, stream,
+                                     evbuffer_get_length(
+                                         bufferevent_get_output(pc->local_proxy_bev)));
     } else {
+        /* SOCKS5/XDPI/default 路径均为同步消费，立即全额归还窗口 */
         send_window_update(bout, stream, bytes_processed);
     }
 
@@ -717,6 +797,16 @@ static int incr_send_window(struct bufferevent *bev,
     }
 
     if (pc->pending_close) {
+        /* 关闭前尽力冲刷滞留的已编码数据；窗口仍不足则等待下一个
+         * WINDOW_UPDATE，避免静默丢弃滞留数据 */
+        if (pc->pending_encoded &&
+            evbuffer_get_length(pc->pending_encoded) > 0) {
+            if (tcp_proxy_flush_pending(pc) < 0)
+                return 1; /* 流错误且 client 已释放 */
+            if (pc->pending_encoded &&
+                evbuffer_get_length(pc->pending_encoded) > 0)
+                return 1; /* 窗口仍耗尽，继续等待 WUP */
+        }
         struct bufferevent *bout = get_main_control()->connect_bev;
         if (bout) {
             debug(LOG_INFO, "Stream %d: pending_close, sending FIN", stream_id);
@@ -730,6 +820,10 @@ static int incr_send_window(struct bufferevent *bev,
               "Stream %u: re-enabling EV_READ after WINDOW_UPDATE local_proxy_bev=%p",
               stream_id, pc->local_proxy_bev);
         bufferevent_enable(pc->local_proxy_bev, EV_READ);
+        /* 窗口重新打开：冲刷滞留的已编码数据（加密/压缩路径），并继续处理
+         * 本地连接输入缓冲中的剩余数据。read 事件在内核无新数据时不会触发，
+         * 必须在此主动调用一次，否则可能永久滞留 */
+        tcp_proxy_c2s_cb(pc->local_proxy_bev, pc);
     }
 
     return 1;

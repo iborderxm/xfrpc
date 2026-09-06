@@ -9,9 +9,9 @@
 #include "uthash.h"
 #include <stdint.h>
 
-#define MAX_STREAM_WINDOW_SIZE (8 * 1024 * 1024)  // 8MB to match frps server
-#define MAX_YAMUX_WINDOW_SIZE  (6 * 1024 * 1024)  // 6MB to match frps MaxStreamWindowSize
-#define DEFAULT_MAX_FRAME_SIZE (256 * 1024)         // 32KB max frame size (matches yamux/smux)
+#define MAX_STREAM_WINDOW_SIZE (512 * 1024)  // 512KB to match frps server
+#define MAX_YAMUX_WINDOW_SIZE  (512 * 1024)  // 512KB to match frps MaxStreamWindowSize
+#define DEFAULT_MAX_FRAME_SIZE (128 * 1024)         // 128KB max frame size (matches yamux/smux)
 
 enum go_away_type {
     NORMAL,

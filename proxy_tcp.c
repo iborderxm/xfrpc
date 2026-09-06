@@ -437,7 +437,7 @@ void handle_xdpi(struct proxy_client *client, struct bufferevent *bev, uint32_t 
  *         is then unrecoverable and the caller must tear down the proxy
  *         connection. All input in src is discarded on failure.
  */
-static int crypto_encode_evbuffer(struct proxy_client *client,
+int crypto_encode_evbuffer(struct proxy_client *client,
                                   struct evbuffer *src, struct evbuffer *dst)
 {
 	size_t len = evbuffer_get_length(src);
@@ -567,6 +567,63 @@ static int crypto_decode_evbuffer(struct proxy_client *client,
 	return 0;
 }
 
+/**
+ * @brief Local connection write callback.
+ *
+ * 当本地连接 output 积压降到 EV_WRITE 低水位以下时触发：
+ * 补发背压期间滞留的 WINDOW_UPDATE（s2c 方向），使 frps 恢复发送。
+ * 对 SOCKS5/XDPI/UDP 等无滞留窗口的流为无害 no-op。
+ */
+void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
+{
+	struct proxy_client *client = (struct proxy_client *)ctx;
+	if (!client || !client->ctl_bev)
+		return;
+
+	struct tmux_stream *stream = &client->stream;
+	/* 流已进入关闭/复位状态后不再补发窗口更新 */
+	if (stream->state >= LOCAL_CLOSE)
+		return;
+	/* 无已消费未归还的窗口额度 */
+	if (stream->recv_window >= MAX_STREAM_WINDOW_SIZE)
+		return;
+
+	tmux_stream_replenish_window(client->ctl_bev, stream,
+	                             evbuffer_get_length(bufferevent_get_output(bev)));
+}
+
+/**
+ * @brief Flush pending already-encoded (encrypted/compressed) data to the
+ *        mux stream after the send window reopens.
+ *
+ * @return 0: nothing pending or fully flushed;
+ *         1: still pending (send_window exhausted), retry later;
+ *         -1: stream error, the proxy client has been freed.
+ */
+int tcp_proxy_flush_pending(struct proxy_client *client)
+{
+	if (!client || !client->pending_encoded)
+		return 0;
+
+	struct evbuffer *pending = client->pending_encoded;
+	while (evbuffer_get_length(pending) > 0) {
+		int written = tmux_stream_write(client->ctl_bev, pending,
+		                                &client->stream);
+		if (written < 0) {
+			debug(LOG_INFO, "Stream %u: flush pending error %d",
+			      client->stream.id, written);
+			del_proxy_client_by_stream_id(client->stream.id);
+			return -1;
+		}
+		if (written == 0)
+			return 1; /* send_window 耗尽，等待 WINDOW_UPDATE */
+	}
+
+	evbuffer_free(client->pending_encoded);
+	client->pending_encoded = NULL;
+	return 0;
+}
+
 void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
 {
 	struct proxy_client *client = (struct proxy_client *)ctx;
@@ -575,16 +632,29 @@ void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
 		return;
 	}
 
+	struct common_conf *c_conf = get_common_config();
+
 	struct evbuffer *src = bufferevent_get_input(bev);
 	size_t len = evbuffer_get_length(src);
-	if (len == 0) {
-		return;
-	}
-
-	struct common_conf *c_conf = get_common_config();
 
 	/* Apply encryption/compression if enabled */
 	if (client->use_encryption || client->use_compression) {
+		/* 先冲刷此前因 send_window 耗尽而滞留的“已编码”数据，
+		 * 保证流内字节顺序（旧数据必须先于新数据发出）。
+		 * 滞留数据绝不能放回 input 重新走编码路径（会二次加密/压缩）。 */
+		int rc = tcp_proxy_flush_pending(client);
+		if (rc < 0)
+			return; /* 流错误，client 与本地 bev 已被释放 */
+		if (rc > 0) {
+			/* 窗口仍耗尽，暂停读取，等待 WINDOW_UPDATE 重开 */
+			bufferevent_disable(bev, EV_READ);
+			return;
+		}
+
+		if (len == 0) {
+			return;
+		}
+
 		struct evbuffer *processed = evbuffer_new();
 		if (!processed) return;
 		if (crypto_encode_evbuffer(client, src, processed) != 0) {
@@ -614,10 +684,18 @@ void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
 				return;
 			}
 			if (written == 0) {
-				/* Window exhausted - put remaining back */
-				struct evbuffer *input = bufferevent_get_input(bev);
-				evbuffer_prepend(input, evbuffer_pullup(processed, -1),
-				                 evbuffer_get_length(processed));
+				/* Window exhausted - 剩余“已编码”数据移入滞留队列，
+				 * 由 WINDOW_UPDATE 重开窗口后经 flush 补发 */
+				if (client->pending_encoded) {
+					evbuffer_add_buffer(client->pending_encoded, processed);
+				} else {
+					debug(LOG_ERR,
+					      "Stream %u: pending buffer unavailable, closing proxy connection",
+					      client->stream.id);
+					evbuffer_free(processed);
+					del_proxy_client_by_stream_id(client->stream.id);
+					return;
+				}
 				evbuffer_free(processed);
 				bufferevent_disable(bev, EV_READ);
 				return;
