@@ -785,6 +785,16 @@ static int incr_send_window(struct bufferevent *bev,
         return 1;
     }
 
+    /* WUP 帧携带 FIN（REMOTE_CLOSE）：立即强杀本地连接并删除流。
+     * FIN 帧的 delta 通常为 0，若继续走下方 send_window==0 的早退分支，
+     * 强杀将被永久跳过——这正是 REMOTE_CLOSE 流滞留泄漏的根因 */
+    if (stream->state == REMOTE_CLOSE) {
+        struct proxy_client *pc_f = get_proxy_client(stream_id);
+        if (pc_f)
+            tcp_proxy_notify_remote_close(pc_f);
+        return 1;
+    }
+
     uint32_t increment = ntohl(tmux_hdr->length);
 
     /* WINDOW_UPDATE 增量是对端广告的发送额度，接受它本身不占用本端内存。
@@ -840,14 +850,6 @@ static int incr_send_window(struct bufferevent *bev,
          * 本地连接输入缓冲中的剩余数据。read 事件在内核无新数据时不会触发，
          * 必须在此主动调用一次，否则可能永久滞留 */
         tcp_proxy_c2s_cb(pc->local_proxy_bev, pc);
-    }
-
-    /* WUP 帧携带的 FIN（REMOTE_CLOSE）：强杀本地连接并删除流。
-     * 强杀会同步释放 pc/stream，必须放在所有 stream/pc 访问之后 */
-    if (get_stream_by_id(stream_id)) {
-        struct proxy_client *pc_final = get_proxy_client(stream_id);
-        if (pc_final)
-            tcp_proxy_notify_remote_close(pc_final);
     }
 
     return 1;
