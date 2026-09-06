@@ -796,19 +796,20 @@ static int incr_send_window(struct bufferevent *bev,
     }
 
     uint32_t increment = ntohl(tmux_hdr->length);
+    uint32_t old_window = stream->send_window;
 
     /* WINDOW_UPDATE 增量是对端广告的发送额度，接受它本身不占用本端内存。
-     * frps 建流后会一次性把窗口补足到其配置的每流窗口（可达数 MB），
-     * 因此不能按本端窗口上限拒绝增量（误判为协议错误会导致断连）。
-     * 本端内存限制靠对 send_window 做饱和加法封顶：
-     * min(MAX_STREAM_WINDOW_SIZE, MAX_YAMUX_WINDOW_SIZE)，
-     * 在途数据永远不会超过该上限 */
-    uint32_t cap = MIN(MAX_STREAM_WINDOW_SIZE, MAX_YAMUX_WINDOW_SIZE);
-    uint32_t old_window = stream->send_window;
-    if (increment >= cap || stream->send_window >= cap - increment)
-        stream->send_window = cap;
-    else
-        stream->send_window += increment;
+     * 关键：必须如实接受对端授权的完整额度，禁止按本端窗口上限做钳制。
+     * yamux 接收端（frps）为减少 WUP 报文，只在累积未归还增量达到
+     * 其 maxWindow 一半量级时才补发一次大的窗口更新；若本端把发送
+     * 窗口钳制在较小值（如 512KB），窗口耗尽后将永远等不到 frps
+     * 的下一次补发（其阈值远未达到），视频等大流量方向将永久卡死。
+     * 发送窗口只是信用计数器，无内存开销；实际在途数据由对端接收
+     * 缓冲与 TCP 拥塞控制天然约束。用 64 位运算防止溢出。 */
+    uint64_t credit = (uint64_t)stream->send_window + (uint64_t)increment;
+    if (credit > UINT32_MAX)
+        credit = UINT32_MAX;
+    stream->send_window = (uint32_t)credit;
 
     debug(LOG_DEBUG, "WUP recv stream=%u inc=%u sw %u->%u",
           stream_id, increment, old_window, stream->send_window);
