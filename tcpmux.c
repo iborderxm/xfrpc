@@ -142,6 +142,8 @@ int tmux_get_stream_count(void) {
     return all_stream ? (int)HASH_COUNT(all_stream) : 0;
 }
 
+static int process_flags(uint16_t flags, struct tmux_stream *stream);
+
 /**
  * @brief Processes SYN/ACK/FIN/RST flags for a zero-length control frame.
  *
