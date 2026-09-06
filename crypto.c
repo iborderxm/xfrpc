@@ -242,8 +242,16 @@ struct frp_coder *new_coder(const char *token, const char *salt)
 		return NULL;
 	}
 
-	encrypt_key(enc->token, strlen(enc->token), enc->salt, enc->key, block_size);
-	encrypt_iv(enc->iv, block_size);
+	/* 密钥/IV 生成失败必须整体失败：带零 IV 继续运行会让本会话
+	 * 客户端方向密钥流固定复用（安全缺陷），并掩盖 RNG 故障。
+	 * 调用方（init_main_encoder / init_main_decoder）均已处理 NULL。 */
+	if (!encrypt_key(enc->token, strlen(enc->token), enc->salt,
+	                 enc->key, block_size) ||
+	    !encrypt_iv(enc->iv, block_size)) {
+		debug(LOG_ERR, "Failed to derive key or generate random IV for coder");
+		free_frp_coder(enc);
+		return NULL;
+	}
 	return enc;
 }
 
@@ -440,8 +448,9 @@ unsigned char *encrypt_iv(unsigned char *iv_buf, size_t iv_len)
 		return NULL;
 	}
 
-	if (xfrpc_random(NULL, iv_buf, iv_len) != 0) {
-		debug(LOG_ERR, "Failed to generate random IV");
+	int ret = xfrpc_random(NULL, iv_buf, iv_len);
+	if (ret != 0) {
+		debug(LOG_ERR, "Failed to generate random IV: -0x%04x", -ret);
 		return NULL;
 	}
 

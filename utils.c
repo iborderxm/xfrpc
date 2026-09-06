@@ -26,19 +26,62 @@
 
 #include "utils.h"
 #include "ssl_compat.h"
+#include "debug.h"
 
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 
-/* 全局随机数生成器：entropy + CTR_DRBG，首次使用时惰性初始化。
- * xfrpc 为单线程事件循环模型，惰性初始化无需加锁。 */
-static mbedtls_entropy_context  g_entropy;
+/* 全局随机数生成器：CTR_DRBG，首次使用时惰性初始化。
+ * xfrpc 为单线程事件循环模型，惰性初始化无需加锁。
+ *
+ * 熵源说明：mbedTLS 3.6.x 平台熵源（entropy_poll.c）的 getrandom()
+ * 分支仅在 __GLIBC__ 下编译，musl 构建退化为 stdio fopen/fread 读
+ * /dev/urandom；且 entropy 模块中任一注册熵源失败都会令整个采集
+ * 流程失败、无冗余回退。嵌入式厂商固件上该路径不可靠（实测
+ * mipsel 设备报 "Failed to generate random IV"）。因此这里不使用
+ * mbedtls_entropy_* 模块，直接以原始 open/read 系统调用读取
+ * /dev/urandom 作为 CTR_DRBG 播种源——与 OpenSSL/Go 运行时一致，
+ * 是各平台上最基础可靠的熵源路径。 */
 static mbedtls_ctr_drbg_context g_ctr_drbg;
 static int g_rng_inited = 0;
 
 /**
+ * CTR_DRBG 熵源回调（mbedTLS f_entropy 签名）：
+ * 用原始系统调用读取 /dev/urandom，不经 stdio，
+ * 失败时记录精确 errno 便于现场设备定位。
+ *
+ * @return 0 成功，MBEDTLS_ERR_ENTROPY_SOURCE_FAILED 表示读取失败
+ */
+static int urandom_entropy_poll(void *data, unsigned char *output,
+				size_t len, size_t *olen)
+{
+	(void)data;
+	*olen = 0;
+
+	int fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0) {
+		debug(LOG_ERR, "open /dev/urandom failed: errno=%d", errno);
+		return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+	}
+
+	while (*olen < len) {
+		ssize_t r = read(fd, output + *olen, len - *olen);
+		if (r <= 0) {
+			debug(LOG_ERR, "read /dev/urandom failed: r=%d errno=%d",
+			      (int)r, errno);
+			close(fd);
+			return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+		}
+		*olen += (size_t)r;
+	}
+
+	close(fd);
+	return 0;
+}
+
+/**
  * 全局随机数生成函数（mbedTLS f_rng 签名）。
- * 首次调用时完成 entropy 采集器与 CTR_DRBG 的播种；
+ * 首次调用时以 /dev/urandom（原始系统调用）播种 CTR_DRBG；
  * p_rng 参数仅为满足 mbedTLS 回调签名，内部未使用。
  *
  * @param p_rng      mbedTLS 回调上下文（忽略）
@@ -52,15 +95,14 @@ int xfrpc_random(void *p_rng, unsigned char *output, size_t output_len)
 
 	if (!g_rng_inited) {
 		int ret;
-		mbedtls_entropy_init(&g_entropy);
 		mbedtls_ctr_drbg_init(&g_ctr_drbg);
 		/* 个性化字符串可为任意固定值，用于增强 DRBG 实例隔离 */
-		ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func,
-					    &g_entropy,
+		ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, urandom_entropy_poll,
+					    NULL,
 					    (const unsigned char *)"xfrpc", 5);
 		if (ret != 0) {
+			debug(LOG_ERR, "CTR_DRBG seed failed: -0x%04x", -ret);
 			mbedtls_ctr_drbg_free(&g_ctr_drbg);
-			mbedtls_entropy_free(&g_entropy);
 			return ret;
 		}
 		g_rng_inited = 1;

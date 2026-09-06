@@ -64,8 +64,9 @@ struct crypto_ctx *crypto_ctx_new_writer(const uint8_t *key)
 	ctx->is_writer = 1;
 
 	/* Generate random IV */
-	if (xfrpc_random(NULL, ctx->iv, AES_BLOCK_SIZE) != 0) {
-		debug(LOG_ERR, "Failed to generate random IV");
+	int rng_ret = xfrpc_random(NULL, ctx->iv, AES_BLOCK_SIZE);
+	if (rng_ret != 0) {
+		debug(LOG_ERR, "Failed to generate random IV: -0x%04x", -rng_ret);
 		free(ctx);
 		return NULL;
 	}
