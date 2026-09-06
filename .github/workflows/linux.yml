@@ -6,16 +6,16 @@ on:
       branch:
         description: '编译xfrpc源码的分支或版本号，默认主分支master'
         required: true
-        default: 'master'
+        default: 'allstatic'
       del:
         description: '是否删除历史编译的流程记录'
         required: true
-        default: true
+        default: false
         type: boolean
       rel:
         description: '编译完成后是否发布Release'
         required: true
-        default: true
+        default: false
         type: boolean
       tag:
         description: '指定Release的版本号（留空为源码提交哈希值）'
