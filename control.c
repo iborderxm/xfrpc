@@ -30,6 +30,7 @@
 #include "control.h"
 #include "crypto.h"
 #include "commandline.h"
+#include "proxy.h"
 #include "utils.h"
 #include "common.h"
 #include "login.h"
@@ -1439,6 +1440,12 @@ static void handle_tcp_mux(struct bufferevent *bev, int len, void *ctx)
 						debug(LOG_DEBUG, "[TMUX] zero-length DATA frame: stream=%u flags=0x%x",
 							  stream_id, ntohs(tmux_hdr.flags));
 						tmux_stream_process_flags(ntohs(tmux_hdr.flags), cur);
+
+						/* FIN：强杀本地连接并删除流（pending_close 场景也在此闭环）。
+						 * process_flags 可能已删除该流，需重新查找 */
+						struct proxy_client *pc2 = get_proxy_client(stream_id);
+						if (pc2)
+							tcp_proxy_notify_remote_close(pc2);
 					}
 					continue;
 				}

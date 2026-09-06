@@ -93,9 +93,9 @@ static int handle_post_connection_data(struct proxy_client *client) {
  * before closing. Loops to handle partial sends when send_window is smaller
  * than remaining data.
  */
-static void handle_proxy_disconnect(struct proxy_client *client, 
-								  struct bufferevent *bev, 
-								  const char *error_msg) {
+void handle_proxy_disconnect(struct proxy_client *client,
+							 struct bufferevent *bev,
+							 const char *error_msg) {
 	if (!client || !client->ps) return;
 
 	debug(LOG_INFO, "Proxy close connection %s - stream_id %d: %s",
@@ -170,7 +170,10 @@ static void handle_proxy_disconnect(struct proxy_client *client,
 
 	// If send_window is exhausted, mark as pending_close and wait for
 	// WINDOW_UPDATE to send FIN.
-	if (client->stream.send_window == 0) {
+	// 例外：对端已 FIN（REMOTE_CLOSE）时不必等待——对端不会再发 WUP，
+	// 且 FIN 控制帧不消耗窗口额度，可直接关闭并删除（滞留数据已不可达）。
+	if (client->stream.send_window == 0 &&
+	    client->stream.state != REMOTE_CLOSE) {
 		debug(LOG_INFO, "Stream %d: send_window==0 at disconnect, deferring close",
 			  client->stream.id);
 		client->pending_close = 1;

@@ -583,14 +583,11 @@ void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
 	struct tmux_stream *stream = &client->stream;
 	size_t backlog = evbuffer_get_length(bufferevent_get_output(bev));
 
-	/* 对端已 FIN：本地 output 排空后立即半关闭本地连接（发 EOF 给本地服务），
-	 * 否则本地服务（SSH/nginx 等）会无限等待，client 也无法走删除流程 */
+	/* 对端已 FIN：s2c 尾部数据写入内核后强杀本地连接并删除流
+	 * （不依赖本地服务主动关闭，避免半关闭等待不闭环） */
 	if (stream->state == REMOTE_CLOSE) {
-		if (backlog == 0) {
-			evutil_socket_t fd = bufferevent_getfd(bev);
-			if (fd >= 0)
-				shutdown(fd, SHUT_WR);
-		}
+		if (backlog == 0)
+			handle_proxy_disconnect(client, bev, "remote closed");
 		return;
 	}
 
@@ -605,24 +602,31 @@ void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
 }
 
 /**
- * @brief Propagates peer FIN (REMOTE_CLOSE) to the local connection.
+ * @brief Force-closes the local connection when the peer has sent FIN.
  *
- * 对端不再发送（s2c 结束）后，将本地 socket 半关闭（SHUT_WR），
- * 使本地服务读到 EOF 并尽快走关闭→删除流程，避免空闲连接
- * 永久滞留造成内存泄漏。output 尚有积压时推迟到 write 回调处理。
+ * frp 语义：对端 FIN 即流终止（s2c/c2s 均不可达），与 frpc (Go) 行为一致：
+ * 立即关闭本地连接、关闭流（补发 FIN）并删除 client，全部内存同步释放。
+ * 本地 output 尚有未写入内核的 s2c 尾部数据时，由 write 回调在排空后
+ * 执行强杀，避免截断本地服务的响应。
  */
 void tcp_proxy_notify_remote_close(struct proxy_client *client)
 {
-	if (!client || !client->local_proxy_bev)
+	if (!client)
 		return;
 	if (client->stream.state != REMOTE_CLOSE)
 		return;
-	if (evbuffer_get_length(bufferevent_get_output(client->local_proxy_bev)) > 0)
-		return; /* 积压未排空，由 write 回调在排空后执行半关闭 */
 
-	evutil_socket_t fd = bufferevent_getfd(client->local_proxy_bev);
-	if (fd >= 0)
-		shutdown(fd, SHUT_WR);
+	struct bufferevent *bev = client->local_proxy_bev;
+	if (bev) {
+		/* 停止读入新的 c2s 数据：对端已关闭，再读也无法送达 */
+		bufferevent_disable(bev, EV_READ);
+		if (evbuffer_get_length(bufferevent_get_output(bev)) > 0)
+			return; /* 尾部数据排空后由 write 回调强杀 */
+	}
+
+	/* bev 为 NULL（本地已先断开/pending_close）时同样走此路径，
+	 * 完成 tmux_stream_close 与 client 删除 */
+	handle_proxy_disconnect(client, bev, "remote closed");
 }
 
 /**
@@ -662,6 +666,14 @@ void tcp_proxy_c2s_cb(struct bufferevent *bev, void *ctx)
 	struct proxy_client *client = (struct proxy_client *)ctx;
 	if (!client || !client->ctl_bev) {
 		debug(LOG_ERR, "Invalid client or control connection");
+		return;
+	}
+
+	/* 对端已 FIN（frp 语义：流终止），c2s 数据已不可达；
+	 * 直接走断开清理（REMOTE_CLOSE 时立即关闭删除，不再等待）。
+	 * 同时避免此路径再次 disable EV_READ 而漏检本地 EOF */
+	if (client->stream.state == REMOTE_CLOSE) {
+		handle_proxy_disconnect(client, bev, "remote already closed");
 		return;
 	}
 

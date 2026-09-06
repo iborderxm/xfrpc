@@ -716,10 +716,6 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
     if (!get_stream_by_id(stream_id))
         return length;
 
-    /* 对端 FIN（REMOTE_CLOSE）：向本地连接传播 EOF，尽快走关闭清理 */
-    if (pc)
-        tcp_proxy_notify_remote_close(pc);
-
     struct bufferevent *bout = get_main_control()->connect_bev;
     if (bytes_processed != length) {
         debug(LOG_ERR,
@@ -758,6 +754,11 @@ int process_data(struct bufferevent *bev, struct tmux_stream *stream,
         send_window_update(bout, stream, bytes_processed);
     }
 
+    /* 对端 FIN（REMOTE_CLOSE）：强杀本地连接并删除流。
+     * 强杀会同步释放 pc/stream，必须放在所有 stream/pc 访问之后 */
+    if (get_stream_by_id(stream_id) && pc)
+        tcp_proxy_notify_remote_close(pc);
+
     return length;
 }
 
@@ -783,10 +784,6 @@ static int incr_send_window(struct bufferevent *bev,
         debug(LOG_DEBUG, "Stream %d no longer exists", stream_id);
         return 1;
     }
-
-    /* WUP 帧携带的 FIN/RST 已由 process_flags 处理：
-     * 对端 FIN（REMOTE_CLOSE）时向本地连接传播 EOF */
-    tcp_proxy_notify_remote_close(get_proxy_client(stream_id));
 
     uint32_t increment = ntohl(tmux_hdr->length);
 
@@ -843,6 +840,14 @@ static int incr_send_window(struct bufferevent *bev,
          * 本地连接输入缓冲中的剩余数据。read 事件在内核无新数据时不会触发，
          * 必须在此主动调用一次，否则可能永久滞留 */
         tcp_proxy_c2s_cb(pc->local_proxy_bev, pc);
+    }
+
+    /* WUP 帧携带的 FIN（REMOTE_CLOSE）：强杀本地连接并删除流。
+     * 强杀会同步释放 pc/stream，必须放在所有 stream/pc 访问之后 */
+    if (get_stream_by_id(stream_id)) {
+        struct proxy_client *pc_final = get_proxy_client(stream_id);
+        if (pc_final)
+            tcp_proxy_notify_remote_close(pc_final);
     }
 
     return 1;

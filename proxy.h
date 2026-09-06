@@ -37,6 +37,9 @@ void tcp_proxy_s2c_cb(struct bufferevent *bev, void *ctx);
 /* 本地连接 write 回调：s2c 积压排空后补发滞留的 WINDOW_UPDATE（背压恢复） */
 void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx);
 void tcp_proxy_notify_remote_close(struct proxy_client *client);
+void handle_proxy_disconnect(struct proxy_client *client,
+							 struct bufferevent *bev,
+							 const char *error_msg);
 
 /* 冲刷滞留的已编码（加密/压缩）数据。
  * 返回 0：无滞留或已全部发出；1：窗口仍耗尽；-1：流错误且 client 已释放 */
