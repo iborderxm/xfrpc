@@ -52,10 +52,10 @@ jobs:
         #   URL: aarch64-linux-musl
         #   ARCH_FLAG: linux-aarch64
 
-        # - target: x86_64-linux-musl
-        #   os: ubuntu-latest
-        #   URL: x86_64-linux-musl
-        #   ARCH_FLAG: linux-x86_64
+        - target: x86_64-linux-musl
+          os: ubuntu-latest
+          URL: x86_64-linux-musl
+          ARCH_FLAG: linux-x86_64
 
         # - target: i686-linux-musl
         #   os: ubuntu-latest
