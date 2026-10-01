@@ -26,47 +26,51 @@
 
 #include "utils.h"
 #include "ssl_compat.h"
-
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
-
-/* 全局随机数生成器：entropy + CTR_DRBG，首次使用时惰性初始化。
- * xfrpc 为单线程事件循环模型，惰性初始化无需加锁。 */
-static mbedtls_entropy_context  g_entropy;
-static mbedtls_ctr_drbg_context g_ctr_drbg;
-static int g_rng_inited = 0;
+#include "debug.h"
 
 /**
  * 全局随机数生成函数（mbedTLS f_rng 签名）。
- * 首次调用时完成 entropy 采集器与 CTR_DRBG 的播种；
- * p_rng 参数仅为满足 mbedTLS 回调签名，内部未使用。
+ *
+ * 直接读取内核 /dev/urandom（open/read，不经过 stdio），不依赖 mbedTLS 的
+ * entropy 采集。原因：动态链接时实际加载的 libmbedcrypto 可能来自目标设备
+ * 固件（soname 相同会静默顶替），其 entropy 源若配置为硬件 RNG
+ * （MBEDTLS_ENTROPY_HARDWARE_ALT / /dev/hwrng），在无对应硬件的平台上 read
+ * 会永久阻塞，进而卡死 xfrpc 的单线程事件循环；/dev/urandom 则永不阻塞。
  *
  * @param p_rng      mbedTLS 回调上下文（忽略）
  * @param output     随机数输出缓冲区
  * @param output_len 需要的随机数字节数
- * @return 0 成功，非 0 为 mbedTLS 错误码
+ * @return 0 成功，-1 失败
  */
 int xfrpc_random(void *p_rng, unsigned char *output, size_t output_len)
 {
 	(void)p_rng;
 
-	if (!g_rng_inited) {
-		int ret;
-		mbedtls_entropy_init(&g_entropy);
-		mbedtls_ctr_drbg_init(&g_ctr_drbg);
-		/* 个性化字符串可为任意固定值，用于增强 DRBG 实例隔离 */
-		ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func,
-					    &g_entropy,
-					    (const unsigned char *)"xfrpc", 5);
-		if (ret != 0) {
-			mbedtls_ctr_drbg_free(&g_ctr_drbg);
-			mbedtls_entropy_free(&g_entropy);
-			return ret;
-		}
-		g_rng_inited = 1;
+	if (!output || output_len == 0)
+		return -1;
+
+	int fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0) {
+		debug(LOG_ERR, "open /dev/urandom failed: %s", strerror(errno));
+		return -1;
 	}
 
-	return mbedtls_ctr_drbg_random(&g_ctr_drbg, output, output_len);
+	size_t got = 0;
+	while (got < output_len) {
+		ssize_t n = read(fd, output + got, output_len - got);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			close(fd);
+			return -1;
+		}
+		if (n == 0) /* /dev/urandom 不会提前 EOF，防御异常设备 */
+			break;
+		got += (size_t)n;
+	}
+
+	close(fd);
+	return got == output_len ? 0 : -1;
 }
 
 /**

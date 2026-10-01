@@ -242,8 +242,12 @@ struct frp_coder *new_coder(const char *token, const char *salt)
 		return NULL;
 	}
 
-	encrypt_key(enc->token, strlen(enc->token), enc->salt, enc->key, block_size);
-	encrypt_iv(enc->iv, block_size);
+	/* 密钥/IV 生成失败必须显式报错，否则会带着全零 IV 继续工作 */
+	if (!encrypt_key(enc->token, strlen(enc->token), enc->salt, enc->key, block_size) ||
+	    !encrypt_iv(enc->iv, block_size)) {
+		free_frp_coder(enc);
+		return NULL;
+	}
 	return enc;
 }
 
