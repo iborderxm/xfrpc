@@ -254,11 +254,11 @@ jobs:
         mkdir -p bin && cd bin
 
         # 清空 dl-musl 注入的环境变量（含 -static 与工具链 -I/-L 路径），
-        # 否则 xfrpc 无法动态链接 zlib/mbedTLS（attempted static link of dynamic object）
+        # 否则 xfrpc 无法动态链接 mbedTLS（attempted static link of dynamic object）
         unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
 
         # 构建完整的编译标志（上游有 -Werror，需加 -Wno-* 绕过假阳性）
-        # zlib / mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
+        # mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
         COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
         COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections -Wl,-rpath,\$ORIGIN"
         # 仅当 matrix 显式配置 LOADER 时才覆盖动态加载器路径
@@ -282,7 +282,7 @@ jobs:
           -DJSON-C_INCLUDE_DIR=$SYSROOT/include \
           -DJSON-C_LIBRARY=$SYSROOT/lib/libjson-c.a \
           -DZLIB_INCLUDE_DIR=$SYSROOT/include \
-          -DZLIB_LIBRARY=$SYSROOT/lib/libz.so \
+          -DZLIB_LIBRARY=$SYSROOT/lib/libz.a \
           -DMBEDTLS_INCLUDE_DIR=$SYSROOT/include \
           -DMBEDTLS_LIBRARY=$SYSROOT/lib/libmbedtls.so \
           -DMBEDX509_LIBRARY=$SYSROOT/lib/libmbedx509.so \
@@ -329,7 +329,7 @@ jobs:
         |------|-----|
         | 架构 | ${{ matrix.target }} |
         | 编译时间 | ${BUILD_TIME} |
-        | 链接方式 | musl：zlib/mbedTLS 动态，json-c/libevent 静态 |
+        | 链接方式 | musl：mbedTLS 动态，zlib/json-c/libevent 静态 |
         | 缓存命中 | ${{ steps.cache-sysroot.outputs.cache-hit }} |
         | TLS/加密后端 | mbedTLS ${{ env.MBEDTLS_VER }} |
         | libevent | ${{ env.LIBEVENT_VER }} (event_mbedtls) |
@@ -341,7 +341,7 @@ jobs:
 
         | 依赖库 | 版本 | 大小 |
         |--------|------|-----------|
-        | zlib | ${{ env.ZLIB_VER }} | ${SZ_ZLIB_DYNAMIC} 字节（动态 libz.so） |
+        | zlib | ${{ env.ZLIB_VER }} | ${SZ_ZLIB_STATIC} 字节 |
         | mbedTLS (tls+x509+crypto) | ${{ env.MBEDTLS_VER }} | ${SZ_MBEDTLS_DYNAMIC} 字节（动态 libmbed*.so） |
         | json-c | ${{ env.JSONC_VER }} | ${SZ_JSONC} 字节（静态） |
         | libevent | ${{ env.LIBEVENT_VER }} | ${SZ_LIBEVENT} 字节（静态） |
@@ -352,7 +352,7 @@ jobs:
         |------|------|------|
         | \`xfrpc-${{ matrix.target }}\` | ${SZ_XFRPC} 字节 | 原始二进制（内嵌 \$ORIGIN rpath） |
         | \`xfrpc-${{ matrix.target }}_upx\` | （见后） | UPX 压缩版，二选一下载即可 |
-        | \`libz.so*\` / \`libmbed*.so*\` | 见上表 | 运行时动态库，必须与 xfrpc 同目录 |
+        | \`libmbed*.so*\` | 见上表 | 运行时动态库，必须与 xfrpc 同目录 |
         SUMMARYEOF
 
         # 保存到环境变量供后续步骤使用
@@ -376,8 +376,7 @@ jobs:
           rm -f xfrpc-${{ matrix.target }}_upx
         }
         # 复制运行时动态库（zlib/mbedTLS 动态链接，rpath=$ORIGIN，需与二进制同目录）
-        # cp -L 解引用符号链接，保证所有 SONAME 文件名（如 libz.so.1）齐全
-        cp -L $SYSROOT/lib/libz.so* .
+        # cp -L 解引用符号链接，保证所有 SONAME 文件名齐全
         cp -L $SYSROOT/lib/libmbedtls.so* .
         cp -L $SYSROOT/lib/libmbedx509.so* .
         cp -L $SYSROOT/lib/libmbedcrypto.so* .
@@ -429,7 +428,7 @@ jobs:
 
          | 依赖库 | 版本 | 链接方式 |
          |--------|------|----------|
-         | zlib | ${{ env.ZLIB_VER }} | 动态 (libz.so) |
+         | zlib | ${{ env.ZLIB_VER }} | 静态 |
          | mbedTLS | ${{ env.MBEDTLS_VER }} | 动态 (libmbed*.so) |
          | json-c | ${{ env.JSONC_VER }} | 静态 |
          | libevent | ${{ env.LIBEVENT_VER }} | 静态 |
@@ -437,7 +436,7 @@ jobs:
          ### 构建信息
 
          - **架构**: ${{ matrix.target }}
-         - **链接方式**: zlib/mbedTLS 动态链接，json-c/libevent 静态链接（musl）
+         - **链接方式**: mbedTLS 动态链接，zlib/json-c/libevent 静态链接（musl）
          - **TLS/加密后端**: mbedTLS ${{ env.MBEDTLS_VER }}（libevent event_mbedtls）
          - **编译优化**: \`-Os -ffunction-sections -fdata-sections -Wl,--gc-sections\`
 
@@ -449,7 +448,7 @@ jobs:
          |------|------|
          | \`xfrpc-${{ matrix.target }}\` | 原始编译二进制（strip 后），可直接运行 |
          | \`xfrpc-${{ matrix.target }}_upx\` | UPX --lzma --best 压缩版，体积更小 |
-         | \`libz.so*\` / \`libmbed*.so*\` | 运行时动态库，需与 xfrpc 放同一目录（rpath=$ORIGIN） |
+         | \`libmbed*.so*\` | 运行时动态库，需与 xfrpc 放同一目录（rpath=$ORIGIN） |
 
          > 两者功能完全相同，**二选一下载即可**。UPX 版首次运行时会自动解压。
          > 下载后请先执行 \`chmod +x xfrpc-*\` 赋予执行权限。

@@ -348,10 +348,10 @@ build_xfrpc() {
     cd "$BUILD_DIR"
 
     # 清空 dl-musl 注入的环境变量（含 -static 与 -I/-L 路径），
-    # 否则 xfrpc 无法动态链接 zlib/mbedTLS（attempted static link of dynamic object）
+    # 否则 xfrpc 无法动态链接 mbedTLS（attempted static link of dynamic object）
     unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
 
-    # zlib / mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
+    # mbedTLS 为动态链接：$ORIGIN rpath 使 .so 与二进制同目录即可运行
     # 上游有 -Werror，需加 -Wno-* 绕过假阳性
     local COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
     local COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections -Wl,-rpath,\$ORIGIN"
@@ -370,7 +370,7 @@ build_xfrpc() {
       -DJSON-C_INCLUDE_DIR="$SYSROOT/include" \
       -DJSON-C_LIBRARY="$SYSROOT/lib/libjson-c.a" \
       -DZLIB_INCLUDE_DIR="$SYSROOT/include" \
-      -DZLIB_LIBRARY="$SYSROOT/lib/libz.so" \
+      -DZLIB_LIBRARY="$SYSROOT/lib/libz.a" \
       -DMBEDTLS_INCLUDE_DIR="$SYSROOT/include" \
       -DMBEDTLS_LIBRARY="$SYSROOT/lib/libmbedtls.so" \
       -DMBEDX509_LIBRARY="$SYSROOT/lib/libmbedx509.so" \
@@ -395,9 +395,8 @@ package_artifacts() {
   # 统一命名: xfrpc-$TARGET
   mv xfrpc "xfrpc-${TARGET}"
 
-  # 复制运行时动态库（zlib/mbedTLS 动态链接，rpath=$ORIGIN，需与二进制同目录）
-  # cp -L 解引用符号链接，保证所有 SONAME 文件名（如 libz.so.1）齐全
-  cp -L "$SYSROOT/lib/libz.so"* .
+  # 复制运行时动态库（mbedTLS 动态链接，rpath=$ORIGIN，需与二进制同目录）
+  # cp -L 解引用符号链接，保证所有 SONAME 文件名齐全
   cp -L "$SYSROOT/lib/libmbedtls.so"* .
   cp -L "$SYSROOT/lib/libmbedx509.so"* .
   cp -L "$SYSROOT/lib/libmbedcrypto.so"* .
