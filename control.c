@@ -874,9 +874,6 @@ static int handle_enc_msg(const uint8_t *enc_msg, int ilen, uint8_t **out)
 	const uint8_t *buf = enc_msg;
 	int remaining_len = ilen;
 
-	debug(LOG_DEBUG, "[ENC] handle_enc_msg: ilen=%d, decoder_inited=%d",
-	      ilen, is_decoder_inited());
-
 	if (!is_decoder_inited()) {
 		int block_size = get_block_size();
 		if (remaining_len < block_size) {

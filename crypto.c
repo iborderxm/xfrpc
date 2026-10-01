@@ -331,11 +331,7 @@ struct frp_coder *init_main_decoder(const uint8_t *iv)
 		free_frp_coder(main_decoder);
 		main_decoder = NULL;
 	}
-	debug(LOG_DEBUG, "[ENC] init_main_decoder: token=%s",
-	      c_conf->auth_token ? c_conf->auth_token : "(null)");
 	main_decoder = new_coder(c_conf->auth_token, default_salt);
-	debug(LOG_DEBUG, "[ENC] init_main_decoder: new_coder done, decoder=%p",
-	      (void *)main_decoder);
 	if (!main_decoder) {
 		debug(LOG_ERR, "init_main_decoder: new_coder failed");
 		return NULL;
@@ -422,15 +418,12 @@ unsigned char *encrypt_key(const char *token, size_t token_len, const char *salt
 		return NULL;
 	}
 
-	debug(LOG_DEBUG, "[ENC] encrypt_key: pbkdf2 start (token_len=%zu, salt=%s)",
-	      token_len, salt);
 	/* PBKDF2-HMAC-SHA1，64 轮迭代，输出 16 字节 AES-128 密钥 */
 	if (xfrpc_pbkdf2_sha1(token, token_len,
 	                      (const unsigned char *)salt, strlen(salt),
 	                      64, key, block_size) != 0) {
 		return NULL;
 	}
-	debug(LOG_DEBUG, "[ENC] encrypt_key: pbkdf2 done");
 	return key;
 }
 
