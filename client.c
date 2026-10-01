@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <unistd.h>
 #include <assert.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/un.h>
 #include <syslog.h>
-#include <zlib.h>
 
 
 #include "debug.h"
@@ -21,7 +21,6 @@
 #include "uthash.h"
 #include "control.h"
 #include "config.h"
-#include "zip.h"
 #include "common.h"
 #include "proxy.h"
 #include "utils.h"
@@ -445,7 +444,7 @@ void start_xfrp_tunnel(struct proxy_client *client)
 		}
 	}
 	if (client->use_compression) {
-		debug(LOG_INFO, "Proxy [%s] compression enabled (zlib)", ps->proxy_name);
+		debug(LOG_INFO, "Proxy [%s] compression enabled (snappy)", ps->proxy_name);
 	}
 
 	/* tcp_mux 下因 send_window 耗尽而滞留的已编码数据队列 */

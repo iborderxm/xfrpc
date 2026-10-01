@@ -18,7 +18,6 @@
 |------|------|
 | libevent（**≥ 2.2**） | 事件循环 + `bufferevent_mbedtls_*`（TLS 传输硬依赖；2.1.x 仅有 OpenSSL 后端，不可用） |
 | json-c | 控制消息 JSON 解析 |
-| zlib | 压缩 |
 | mbedTLS（**3.6.x**） | 唯一 TLS/加密后端：TLS 传输（经 libevent event_mbedtls）+ crypto 层（PBKDF2/AES-128-CFB/MD5/CTR_DRBG） |
 | 内置 vendor | `vendor/snappy/`（压缩）、`vendor/tomlc17/`（TOML 解析） |
 
@@ -74,7 +73,7 @@ main.c::main
 | **XTCP P2P** | `xtcp_client.c`、`xtcp_visitor.c`、`nathole.c` | NAT 打洞 + P2P 访客 |
 | **STCP 访客** | `visitor.c` | stcp/xtcp 访客端连接 |
 | **QUIC** | `quic_client_transport.c/h`（恒编译，仅桩函数：`quic_transport_available()` 返回 0） | QUIC 传输占位（ngtcp2 已移除，`protocol=quic` 运行时报错退出） |
-| **加密/流** | `crypto.c`、`crypto_stream.c`、`zip.c` | PBKDF2/AES-128-CFB（mbedTLS）、流加密、snappy 压缩、zip |
+| **加密/流** | `crypto.c`、`crypto_stream.c` | PBKDF2/AES-128-CFB（mbedTLS）、流加密、snappy 压缩 |
 | **TLS 隧道** | `tls.c/h`、`ssl_compat.h` | TLS-over-TCP 传输（libevent ≥2.2 `bufferevent_mbedtls_*` + mbedTLS 3.6） |
 | **辅助** | `utils.c`、`common.c`、`debug.c`、`health_check.c`、`oidc_auth.c`、`mongoose.c`（嵌入式 HTTP） | 工具函数、健康检查、OIDC 认证 |
 | **SOCKS5/xdpi** | `client.c/h` | SOCKS5 代理状态机、协议 DPI 识别（MSTSC/RDP/VNC/SSH 等） |
@@ -112,7 +111,7 @@ main.c::main
 | 新增配置项 | `config.c`（INI/TOML 双路径都要处理）+ `xfrpc_full.toml` 文档 |
 | TLS 相关改动 | `tls.c`（TLS 传输，libevent `bufferevent_mbedtls_*`）与 `crypto.c`（加密原语，mbedTLS）；改动后分别验证 TLS 握手与加密流。mbedTLS 无系统 CA 信任库，CA bundle 路径在 `tls.c::tls_load_system_ca` 探测 |
 | QUIC 相关 | 不支持：ngtcp2 无 mbedTLS 后端；勿重新引入 `quic_transport.*` 或 OpenSSL 依赖 |
-| 交叉编译调试 | 参考 `.github/workflows/linux.yml` 的 sysroot 构建流程（zlib→mbedTLS→json-c→libevent 2.2） |
+| 交叉编译调试 | 参考 `.github/workflows/linux.yml` 的 sysroot 构建流程（mbedTLS→json-c→libevent 2.2） |
 
 ## 7. 分析注意事项
 

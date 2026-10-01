@@ -3,7 +3,7 @@
 # build.sh — 在 Ubuntu x86_64 本地编译 xfrpc
 # 参照 .github/workflows/linux.yml 中 x86_64-linux-musl 矩阵项的流程：
 #   1. 下载 musl-gcc 工具链到 x86_64-linux-musl-cross（等价 lmq8267/dl-musl）
-#   2. 交叉编译依赖库 zlib + mbedTLS + json-c + libevent → sysroot（带缓存）
+#   2. 交叉编译依赖库 mbedTLS + json-c + libevent → sysroot（带缓存）
 #   3. 编译 xfrpc → bin/
 #   4. 打包运行时动态库到 bin/
 #
@@ -18,10 +18,15 @@
 
 set -euo pipefail
 
+# 自愈：脚本若被从 Windows 拷成 CRLF 行尾，先原地转换再重新执行
+if grep -q $'\r' "$0" 2>/dev/null; then
+  sed -i 's/\r$//' "$0"
+  exec bash "$0" "$@"
+fi
+
 # ============================================================
 # 配置（与 .github/workflows/linux.yml env 保持一致）
 # ============================================================
-ZLIB_VER=1.3.1
 MBEDTLS_VER=3.6.5
 JSONC_VER=0.19
 JSONC_TAG=json-c-0.19-20260627
@@ -35,9 +40,8 @@ ARCH_FLAG=linux-x86_64
 SRC_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # 路径（与 linux.yml 一致，方便缓存复用）
-# 必须用绝对路径：编译依赖库时会 cd 进源码子目录（如 zlib-src）再调用 $CC 和
+# 必须用绝对路径：编译依赖库时会 cd 进源码子目录（如 mbedtls-src）再调用 $CC 和
 # ./configure，相对路径 ./x86_64-linux-musl-cross、./sysroot 在子目录中会失效
-# （症状：zlib configure 报 "Compiler error reporting is too harsh"）
 TOOLCHAIN_DIR="$SRC_ROOT/${TARGET}-cross"
 SYSROOT="$SRC_ROOT/sysroot"
 BUILD_DIR=bin
@@ -82,9 +86,28 @@ die()  { err "错误: $*"; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1（请先安装）"; }
 require curl
 require tar
+require bzip2
+require gzip
 require cmake
 require make
 require file
+
+# fetch_and_extract <url> <dest_dir> <j|z>
+#   先下载到临时文件（带重试 + 完整性预检），再解压。
+#   避免 `curl | tar` 管道中途断流时收到残缺数据导致解压失败。
+fetch_and_extract() {
+  local url="$1" dest="$2" flag="$3"
+  local tmp_tar; tmp_tar=$(mktemp)
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$tmp_tar" "$url" \
+    || die "下载失败: $url"
+  [ -s "$tmp_tar" ] || die "下载内容为空: $url"
+  case "$flag" in
+    j) bzip2 -t "$tmp_tar" 2>/dev/null || die "压缩包损坏（bzip2 校验失败，可能是网络中断）: $url" ;;
+    z) gzip -t  "$tmp_tar" 2>/dev/null || die "压缩包损坏（gzip 校验失败，可能是网络中断）: $url" ;;
+  esac
+  tar -x"$flag" -f "$tmp_tar" -C "$dest" --strip-components=1
+  rm -f "$tmp_tar"
+}
 
 # ============================================================
 # 步骤 1：下载 musl-gcc 工具链（等价 lmq8267/dl-musl action）
@@ -98,7 +121,9 @@ setup_toolchain() {
   info "==> 下载 musl-gcc 工具链到 $TOOLCHAIN_DIR ..."
   local url="https://github.com/lmq8267/Toolchain/releases/download/musl-cross/${TARGET}-cross.tgz"
   local tmp_tar; tmp_tar=$(mktemp)
-  curl -fL "$url" -o "$tmp_tar" || die "下载失败: $url"
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$tmp_tar" "$url" \
+    || die "下载失败: $url"
+  gzip -t "$tmp_tar" 2>/dev/null || die "压缩包损坏（gzip 校验失败，可能是网络中断）: $url"
   mkdir -p "$(dirname "$TOOLCHAIN_DIR")"
   tar xzf "$tmp_tar" -C "$(dirname "$TOOLCHAIN_DIR")"
   rm -f "$tmp_tar"
@@ -169,9 +194,9 @@ _dep_rebuild_msg() {
 }
 
 # ============================================================
-# 步骤 2：交叉编译依赖库（zlib + mbedTLS + json-c + libevent）
+# 步骤 2：交叉编译依赖库（mbedTLS + json-c + libevent）
 #   每个库独立检查缓存（版本标记 + 关键产物），中途挂掉后重跑能复用已完成的库，
-#   升级某个库版本时自动只重编该库及其依赖方（顺序由调用链保证：zlib→mbedTLS→libevent）
+#   升级某个库版本时自动只重编该库及其依赖方（顺序由调用链保证：mbedTLS→libevent）
 # ============================================================
 build_deps() {
   mkdir -p "$SYSROOT" "$_DEPCACHE_DIR"
@@ -187,41 +212,10 @@ build_deps() {
   local skipped=0 built=0
 
   # ------------------------------------------------------------
-  # 1/4: zlib 1.3.1（无上游依赖）
+  # 1/3: mbedTLS（无上游依赖）
   # ------------------------------------------------------------
-  info "===== [1/4] 编译 zlib $ZLIB_VER ====="
-  if _dep_cached zlib "$ZLIB_VER" \
-      "$SYSROOT/lib/libz.a" "$SYSROOT/lib/libz.so"; then
-    ok "  ✓ zlib 缓存命中"
-    skipped=$((skipped + 1))
-  else
-    _dep_rebuild_msg zlib "$ZLIB_VER"
-    rm -rf zlib-src && mkdir zlib-src
-    curl -sL "https://github.com/madler/zlib/archive/refs/tags/v${ZLIB_VER}.tar.gz" | \
-      tar xz -C zlib-src --strip-components=1
-    (
-      cd zlib-src
-      # LDFLAGS 显式置空：dl-musl 注入的 -static 会污染 zlib 自带示例
-      CC=$CC AR=$AR RANLIB=$RANLIB \
-        CFLAGS="$COMMON_CFLAGS -fPIC" LDFLAGS="" \
-        ./configure --prefix="$SYSROOT" \
-                    --libdir="$SYSROOT/lib" \
-                    --includedir="$SYSROOT/include" \
-        || { cat configure.log; die "zlib configure 失败，真实错误见上方日志"; }
-      make -j"$(nproc)" libz.a libz.so.1.3.1
-      make install
-    )
-    _dep_mark zlib "$ZLIB_VER"
-    ok "✓ zlib 完成（静态 + 动态）"
-    ls -lh "$SYSROOT/lib/libz.a" "$SYSROOT"/lib/libz.so*
-    built=$((built + 1))
-  fi
-
-  # ------------------------------------------------------------
-  # 2/4: mbedTLS（cmake 会 find zlib，marker 需绑定 zlib 版本）
-  # ------------------------------------------------------------
-  local MBEDTLS_FINGERPRINT="$MBEDTLS_VER:$ZLIB_VER"
-  info "===== [2/4] 编译 mbedTLS $MBEDTLS_VER ====="
+  local MBEDTLS_FINGERPRINT="$MBEDTLS_VER"
+  info "===== [1/3] 编译 mbedTLS $MBEDTLS_VER ====="
   if _dep_cached mbedtls "$MBEDTLS_FINGERPRINT" \
       "$SYSROOT/lib/libmbedtls.a" "$SYSROOT/lib/libmbedtls.so"; then
     ok "  ✓ mbedTLS 缓存命中"
@@ -229,8 +223,8 @@ build_deps() {
   else
     _dep_rebuild_msg mbedtls "$MBEDTLS_FINGERPRINT"
     rm -rf mbedtls-src && mkdir mbedtls-src
-    curl -sL "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VER}/mbedtls-${MBEDTLS_VER}.tar.bz2" | \
-      tar xj -C mbedtls-src --strip-components=1
+    fetch_and_extract "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VER}/mbedtls-${MBEDTLS_VER}.tar.bz2" \
+      mbedtls-src j
     (
       cd mbedtls-src
       cmake -B build -DCMAKE_C_COMPILER="$CC" \
@@ -256,9 +250,9 @@ build_deps() {
   fi
 
   # ------------------------------------------------------------
-  # 3/4: json-c（独立库，不依赖其他）
+  # 2/3: json-c（独立库，不依赖其他）
   # ------------------------------------------------------------
-  info "===== [3/4] 编译 json-c $JSONC_VER ====="
+  info "===== [2/3] 编译 json-c $JSONC_VER ====="
   if _dep_cached jsonc "$JSONC_VER" \
       "$SYSROOT/lib/libjson-c.a"; then
     ok "  ✓ json-c 缓存命中"
@@ -266,8 +260,8 @@ build_deps() {
   else
     _dep_rebuild_msg jsonc "$JSONC_VER"
     rm -rf jsonc-src && mkdir jsonc-src
-    curl -sL "https://github.com/json-c/json-c/releases/download/${JSONC_TAG}/json-c-${JSONC_VER}-nodoc.tar.gz" | \
-      tar xz -C jsonc-src --strip-components=1
+    fetch_and_extract "https://github.com/json-c/json-c/releases/download/${JSONC_TAG}/json-c-${JSONC_VER}-nodoc.tar.gz" \
+      jsonc-src z
     (
       cd jsonc-src
       cmake -B build -DCMAKE_C_COMPILER="$CC" \
@@ -286,10 +280,10 @@ build_deps() {
   fi
 
   # ------------------------------------------------------------
-  # 4/4: libevent（显式链接 mbedTLS，marker 需绑定 mbedTLS 版本）
+  # 3/3: libevent（显式链接 mbedTLS，marker 需绑定 mbedTLS 版本）
   # ------------------------------------------------------------
   local LIBEVENT_FINGERPRINT="$LIBEVENT_VER:$MBEDTLS_VER"
-  info "===== [4/4] 编译 libevent $LIBEVENT_VER ====="
+  info "===== [3/3] 编译 libevent $LIBEVENT_VER ====="
   if _dep_cached libevent "$LIBEVENT_FINGERPRINT" \
       "$SYSROOT/lib/libevent.a" "$SYSROOT/include/event2/event-config.h"; then
     ok "  ✓ libevent 缓存命中"
@@ -297,8 +291,8 @@ build_deps() {
   else
     _dep_rebuild_msg libevent "$LIBEVENT_FINGERPRINT"
     rm -rf libevent-src && mkdir libevent-src
-    curl -sL "https://github.com/libevent/libevent/releases/download/${LIBEVENT_TAG}/libevent-${LIBEVENT_VER}.tar.gz" | \
-      tar xz -C libevent-src --strip-components=1
+    fetch_and_extract "https://github.com/libevent/libevent/releases/download/${LIBEVENT_TAG}/libevent-${LIBEVENT_VER}.tar.gz" \
+      libevent-src z
     (
       cd libevent-src
       cmake -B build -DCMAKE_C_COMPILER="$CC" \
@@ -369,8 +363,6 @@ build_xfrpc() {
       -DLIBEVENT_MBEDTLS_LIB="$SYSROOT/lib/libevent_mbedtls.a" \
       -DJSON-C_INCLUDE_DIR="$SYSROOT/include" \
       -DJSON-C_LIBRARY="$SYSROOT/lib/libjson-c.a" \
-      -DZLIB_INCLUDE_DIR="$SYSROOT/include" \
-      -DZLIB_LIBRARY="$SYSROOT/lib/libz.a" \
       -DMBEDTLS_INCLUDE_DIR="$SYSROOT/include" \
       -DMBEDTLS_LIBRARY="$SYSROOT/lib/libmbedtls.so" \
       -DMBEDX509_LIBRARY="$SYSROOT/lib/libmbedx509.so" \
@@ -413,7 +405,7 @@ package_artifacts() {
 do_clean() {
   info "==> 清理构建产物..."
   rm -rf "$BUILD_DIR" \
-         zlib-src mbedtls-src jsonc-src libevent-src \
+         mbedtls-src jsonc-src libevent-src \
          "$SYSROOT"
   ok "✓ 已清理: $BUILD_DIR / sysroot"
   exit 0

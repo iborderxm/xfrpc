@@ -22,7 +22,6 @@ RUN apk add --no-cache \
     gzip \
     cmake \
     json-c-dev \
-    zlib-dev \
     linux-headers
 
 # Create build directory
@@ -65,8 +64,7 @@ RUN apk add --no-cache \
     libevent \
     mbedtls \
     libc-utils \
-    json-c \
-    zlib
+    json-c
 
 # Create necessary directories
 RUN mkdir -p /usr/local/frp /usr/local/xfrpc && \

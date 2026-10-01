@@ -12,7 +12,6 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 # Find required packages from the system
 find_package(LibEvent REQUIRED)
 find_package(JSON-C REQUIRED)
-find_package(ZLIB REQUIRED)
 
 # TLS/SSL + crypto backend: mbedTLS 3.6.x (required)
 # - TLS transport: libevent bufferevent_mbedtls (libevent >= 2.2), see tls.c
@@ -35,7 +34,6 @@ message(STATUS "TLS/crypto backend: mbedTLS (${MBEDTLS_LIBRARY})")
 
 include_directories(
     ${JSON-C_INCLUDE_DIR}
-    ${ZLIB_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}
 )
 
@@ -79,7 +77,6 @@ set(CORE_SOURCES
     msg.c
     xfrpc.c
     debug.c
-    zip.c
     commandline.c
     crypto.c
     utils.c
@@ -132,7 +129,6 @@ set(EXTERNAL_LIBS
     event
     event_mbedtls
     ${JSON-C_LIBRARIES}
-    ${ZLIB_LIBRARIES}
 )
 
 # Set debug flags
