@@ -169,6 +169,27 @@ void set_cur_stream(struct tmux_stream *stream) {
     debug(LOG_DEBUG, "Current stream %s", stream ? "updated" : "cleared");
 }
 
+/* 运行时流接收窗口上限（字节），由 common.tcp_mux_window 配置驱动 */
+static uint32_t s_max_stream_window = DEFAULT_STREAM_WINDOW_SIZE;
+
+uint32_t tmux_max_stream_window(void)
+{
+    return s_max_stream_window;
+}
+
+void tmux_set_max_stream_window(uint32_t window)
+{
+    if (window == 0) {
+        window = DEFAULT_STREAM_WINDOW_SIZE;
+    } else if (window > MAX_STREAM_WINDOW_SIZE) {
+        window = MAX_STREAM_WINDOW_SIZE;
+    } else if (window < DEFAULT_MAX_FRAME_SIZE) {
+        /* 窗口不得小于单帧上限，避免对端因窗口耗尽而无法接收整帧 */
+        window = DEFAULT_MAX_FRAME_SIZE;
+    }
+    s_max_stream_window = window;
+}
+
 /**
  * @brief Initializes a tmux stream with the given parameters.
  */
@@ -185,7 +206,7 @@ void init_tmux_stream(struct tmux_stream *stream, uint32_t id, enum tcp_mux_stat
 
     stream->id = id;
     stream->state = state;
-    stream->recv_window = MAX_STREAM_WINDOW_SIZE;  // 512KB
+    stream->recv_window = tmux_max_stream_window();
     stream->send_window = 128 * 1024;  // 128KB initial (matches yamux initialStreamWindow)
 
     add_stream(stream);
@@ -547,7 +568,7 @@ void send_window_update(struct bufferevent *bout, struct tmux_stream *stream, ui
         return;
     }
 
-    const uint32_t max_window = MAX_STREAM_WINDOW_SIZE;
+    const uint32_t max_window = tmux_max_stream_window();
     uint32_t delta = (stream->recv_window < max_window) ? (max_window - stream->recv_window) : 0;
     if (delta == 0) {
         return;
@@ -564,7 +585,7 @@ void send_window_update(struct bufferevent *bout, struct tmux_stream *stream, ui
 /**
  * @brief Backpressure-aware receive window replenishment (s2c direction).
  *
- * 维持不变式：本地 output 积压 + recv_window <= MAX_STREAM_WINDOW_SIZE。
+ * 维持不变式：本地 output 积压 + recv_window <= tmux_max_stream_window()。
  * 只有当当前窗口额度低于该上限允许的额度时才补发 WINDOW_UPDATE，
  * 且归还的 delta 不会超过已消费但未归还的字节（诚实记账，
  * recv_window 始终与对端实际可用窗口保持一致）。
@@ -577,17 +598,18 @@ void tmux_stream_replenish_window(struct bufferevent *bout,
         return;
 
     /* 已消费但尚未归还给对端的窗口额度 */
+    const uint32_t max_win = tmux_max_stream_window();
     uint32_t withheld = 0;
-    if (stream->recv_window < MAX_STREAM_WINDOW_SIZE)
-        withheld = MAX_STREAM_WINDOW_SIZE - stream->recv_window;
+    if (stream->recv_window < max_win)
+        withheld = max_win - stream->recv_window;
     if (withheld == 0)
         return;
 
     /* 积压超过窗口上限时不再归还任何额度，等待积压排空（write 回调补发） */
-    if (backlog >= MAX_STREAM_WINDOW_SIZE)
+    if (backlog >= max_win)
         return;
 
-    uint32_t target = MAX_STREAM_WINDOW_SIZE - (uint32_t)backlog;
+    uint32_t target = max_win - (uint32_t)backlog;
     if (stream->recv_window >= target)
         return; /* 现有额度已足够，无需补发 */
 

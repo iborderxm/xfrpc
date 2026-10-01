@@ -595,7 +595,7 @@ void tcp_proxy_local_write_cb(struct bufferevent *bev, void *ctx)
 	if (stream->state >= LOCAL_CLOSE)
 		return;
 	/* 无已消费未归还的窗口额度 */
-	if (stream->recv_window >= MAX_STREAM_WINDOW_SIZE)
+	if (stream->recv_window >= tmux_max_stream_window())
 		return;
 
 	tmux_stream_replenish_window(client->ctl_bev, stream, backlog);

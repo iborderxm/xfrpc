@@ -764,6 +764,11 @@ static int common_handler(void *user, const char *section, const char *name, con
 	else if (MATCH("common", "tcp_mux")) {
 		config->tcp_mux = !!atoi(value); // Convert to boolean
 	}
+	else if (MATCH("common", "tcp_mux_window")) {
+		int w = atoi(value);
+		/* <=0 或非法值回落到默认窗口（tmux_set_max_stream_window 亦兜底） */
+		config->tcp_mux_window = w > 0 ? w : 0;
+	}
 	else if (MATCH("common", "protocol")) {
 		SAFE_FREE(config->protocol);
 		config->protocol = strdup(value);
@@ -860,6 +865,7 @@ static void init_common_conf(struct common_conf *config) {
 	config->heartbeat_interval = 30;
 	config->heartbeat_timeout = 90;
 	config->tcp_mux = 1;
+	config->tcp_mux_window = DEFAULT_STREAM_WINDOW_SIZE;
 	config->tls_enable = 0;
 	config->protocol = strdup("tcp");
 	config->quic_bind_port = 0;
@@ -923,6 +929,7 @@ static void ps_set_string(char **field, const char *value)
  *   transport.tls.*     -> tls_*
  *   transport.heartbeat.* -> heartbeat_*
  *   transport.tcpMux    -> tcp_mux
+ *   transport.tcpMuxWindow -> tcp_mux_window
  *   log.to / log.level  -> (ignored, xfrpc uses its own logging)
  */
 static void load_toml_common(struct toml_doc *doc)
@@ -998,6 +1005,8 @@ static void load_toml_common(struct toml_doc *doc)
 	}
 	if ((v = toml_get(root, "transport.tcpMux")))
 		c_conf->tcp_mux = is_true(v);
+	if ((v = toml_get(root, "transport.tcpMuxWindow")) && atoi(v) > 0)
+		c_conf->tcp_mux_window = atoi(v);
 	if ((v = toml_get(root, "transport.heartbeatInterval")))
 		c_conf->heartbeat_interval = atoi(v);
 	if ((v = toml_get(root, "transport.heartbeatTimeout")))

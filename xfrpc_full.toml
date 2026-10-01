@@ -5,6 +5,12 @@ serverPort = 7070
 auth.method = "token"
 auth.token = "test_token_123"
 
+# TCP stream multiplexing (1 control connection shared by all proxies)
+transport.tcpMux = true
+# Per-stream receive window in bytes; smaller values reduce memory on
+# embedded devices (default 131072 = 128KB, clamped to [131072, 524288])
+transport.tcpMuxWindow = 131072
+
 transport.tls.enable = true
 transport.tls.certFile = "/etc/xfrpc-client.crt"
 transport.tls.keyFile = "/etc/xfrpc-client.key"

@@ -6,6 +6,8 @@ project(xfrp C)
 # Build options
 option(DEBUG "Enable debug mode" OFF)
 option(ENABLE_SANITIZER "Enable sanitizer(Debug+Gcc/Clang/AppleClang)" ON)
+option(ENABLE_PLUGINS
+    "Build builtin plugins (telnetd/httpd/instaloader/youtubedl; pulls in the mongoose HTTP server)" ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 
@@ -96,7 +98,6 @@ set(PROXY_SOURCES
     xtcp_client.c
     nathole.c
     tcp_redir.c
-    mongoose.c
 )
 # quic_client_transport.c is always compiled but only provides stubs
 # ("QUIC not compiled in"): ngtcp2 has no mbedTLS crypto backend.
@@ -113,8 +114,16 @@ set(PLUGIN_SOURCES
 set(src_xfrpc
     ${CORE_SOURCES}
     ${PROXY_SOURCES}
-    ${PLUGIN_SOURCES}
 )
+
+# Plugins (telnetd/httpd/instaloader/youtubedl) are optional: they pull in
+# mongoose.c (~hundreds of KB of text) which embedded builds don't need.
+if(ENABLE_PLUGINS)
+    list(APPEND src_xfrpc ${PLUGIN_SOURCES} mongoose.c)
+    add_definitions(-DENABLE_PLUGINS)
+else()
+    message(STATUS "Builtin plugins disabled (ENABLE_PLUGINS=OFF)")
+endif()
 
 # Required libraries
 set(SYSTEM_LIBS
@@ -133,12 +142,19 @@ set(EXTERNAL_LIBS
 
 # Set debug flags
 if(DEBUG)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0")
+    # -g + XFRPC_DEBUG (compile-in verbose runtime logging). Do NOT force
+    # -O0 here: callers passing explicit -Os/-O2 in CMAKE_C_FLAGS would be
+    # silently overridden since GCC honors the last optimization flag.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
     add_definitions(-DXFRPC_DEBUG)
-    message(STATUS "Debug mode: ON (-g -O0 flags added, XFRPC_DEBUG defined)")
+    message(STATUS "Debug mode: ON (-g, XFRPC_DEBUG defined)")
 else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
-    message(STATUS "Debug mode: OFF (optimized build)")
+    # Size-optimized build: -Os trims text noticeably on embedded targets,
+    # and section-level GC lets the linker discard unreferenced code/data
+    # (dead helpers, unused library branches) from the final binary.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os -ffunction-sections -fdata-sections")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections")
+    message(STATUS "Debug mode: OFF (-Os + section GC)")
 endif()
 
 # Compiler flags

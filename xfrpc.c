@@ -26,10 +26,12 @@
 #include "utils.h"
 #include "tcp_redir.h"
 
+#ifdef ENABLE_PLUGINS
 #include "plugins/youtubedl.h"
 #include "plugins/telnetd.h"
 #include "plugins/instaloader.h"
 #include "plugins/httpd.h"
+#endif
 
 /**
  * @brief Starts local services based on proxy service configurations
@@ -44,6 +46,18 @@
  */
 static void start_xfrpc_local_service(void)
 {
+#ifndef ENABLE_PLUGINS
+	/* Plugins compiled out: only log when a config actually references one,
+	 * so plain proxy setups stay quiet. */
+	struct proxy_service *ps, *ps_tmp;
+	struct proxy_service *all_ps = get_all_proxy_services();
+
+	HASH_ITER(hh, all_ps, ps, ps_tmp) {
+		if (ps->plugin)
+			debug(LOG_WARNING, "Plugin [%s] requested but built without ENABLE_PLUGINS, skipping",
+			      ps->plugin);
+	}
+#else
 	struct proxy_service *ps, *ps_tmp;
 	struct proxy_service *all_ps = get_all_proxy_services();
 
@@ -65,6 +79,7 @@ static void start_xfrpc_local_service(void)
 			debug(LOG_ERR, "start_xfrpc_local_service: unknown plugin %s", ps->plugin);
 		}
 	}
+#endif
 }
 
 /**

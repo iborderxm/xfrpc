@@ -9,9 +9,17 @@
 #include "uthash.h"
 #include <stdint.h>
 
-#define MAX_STREAM_WINDOW_SIZE (512 * 1024)  // 512KB to match frps server
-#define MAX_YAMUX_WINDOW_SIZE  (512 * 1024)  // 512KB to match frps MaxStreamWindowSize
+/* Per-stream receive window (bytes). Runtime-configurable via
+ * common.tcp_mux_window; clamped to [DEFAULT_MAX_FRAME_SIZE,
+ * MAX_STREAM_WINDOW_SIZE]. Default 128KB keeps per-stream memory bounded
+ * (backlog + recv_window <= window) with adequate LAN/broadband throughput.
+ * The upper clamp 512KB matches frps smux MaxStreamBuffer default. */
+#define DEFAULT_STREAM_WINDOW_SIZE (128 * 1024)
+#define MAX_STREAM_WINDOW_SIZE     (512 * 1024)
 #define DEFAULT_MAX_FRAME_SIZE (128 * 1024)         // 128KB max frame size (matches yamux/smux)
+
+uint32_t tmux_max_stream_window(void);
+void tmux_set_max_stream_window(uint32_t window);
 
 enum go_away_type {
     NORMAL,
@@ -95,7 +103,7 @@ void send_window_update(struct bufferevent *bout, struct tmux_stream *stream,
  * @brief Backpressure-aware receive window replenishment (s2c direction).
  *
  * 只在 (本地 output 积压 + 未归还窗口) 允许的范围内归还窗口额度，
- * 维持不变式：backlog + recv_window <= MAX_STREAM_WINDOW_SIZE，
+ * 维持不变式：backlog + recv_window <= tmux_max_stream_window()，
  * 防止对端无限灌入数据导致进程内存持续增长。
  * 积压排空后的补发由本地连接的 write 回调触发。
  *

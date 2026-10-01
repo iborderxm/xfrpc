@@ -1422,9 +1422,10 @@ static void handle_tcp_mux(struct bufferevent *bev, int len, void *ctx)
 				stream_len = ntohl(tmux_hdr.length);
 				debug(LOG_DEBUG, "[TMUX] TMUX_DATA frame: stream=%u, payload=%u, buf_remain=%d",
 				      stream_id, stream_len, len);
-				if (stream_len > MAX_STREAM_WINDOW_SIZE) {
+				const uint32_t max_win = tmux_max_stream_window();
+				if (stream_len > max_win) {
 					debug(LOG_ERR, "Stream %u: TMUX_DATA length %u exceeds maximum %u, aborting",
-					      stream_id, stream_len, MAX_STREAM_WINDOW_SIZE);
+					      stream_id, stream_len, max_win);
 					break;
 				}
 				cur = get_stream_by_id(stream_id);
@@ -2548,6 +2549,9 @@ void init_main_control()
 
 	// Initialize TCP multiplexing if enabled
 	struct common_conf *c_conf = get_common_config();
+	/* Apply configurable per-stream receive window (tcp_mux_window) */
+	if (c_conf->tcp_mux_window > 0)
+		tmux_set_max_stream_window((uint32_t)c_conf->tcp_mux_window);
 	if (c_conf->tcp_mux) {
 		init_tmux_stream(&main_ctl->stream, get_next_session_id(), INIT);
 	}
@@ -2652,6 +2656,8 @@ static void clear_main_control()
         // Reinitialize TCP multiplexing if enabled
         struct common_conf *conf = get_common_config();
         if (conf && conf->tcp_mux) {
+                if (conf->tcp_mux_window > 0)
+                        tmux_set_max_stream_window((uint32_t)conf->tcp_mux_window);
                 uint32_t session_id = get_next_session_id();
                 init_tmux_stream(&main_ctl->stream, session_id, INIT);
                 debug(LOG_DEBUG, "Reinitialized TCP mux stream with session ID %u", session_id);

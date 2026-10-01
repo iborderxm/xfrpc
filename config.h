@@ -49,7 +49,9 @@ struct common_conf {
 	/* Connection settings */
 	int     heartbeat_interval;    /* default 10 */
 	int     heartbeat_timeout;     /* default 30 */
-	int     tcp_mux;              /* default 0 */
+	int     tcp_mux;              /* default 1 */
+	int     tcp_mux_window;       /* tcp_mux per-stream recv window in bytes;
+	                                 default 128KB, clamped to [128KB, 512KB] */
 
 	/* Transport protocol: "tcp" (default), "quic" */
 	char    *protocol;

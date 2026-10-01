@@ -21,6 +21,11 @@ on:
         description: '指定Release的版本号（留空为源码提交哈希值）'
         required: false
         default: ''
+      debug:
+        description: '是否启用 DEBUG 模式（保留 XFRPC_DEBUG 详细日志并加 -g；默认 OFF 走 -Os 体积优化）'
+        required: false
+        default: false
+        type: boolean
 
 env:
   # 依赖库版本 - 统一在此修改
@@ -33,6 +38,7 @@ env:
   branch: "${{ github.event.inputs.branch }}"
   tag: "${{ github.event.inputs.tag }}"
   rel: "${{ github.event.inputs.rel }}"
+  debug: "${{ github.event.inputs.debug }}"
   TZ: Asia/Shanghai
 
 permissions:
@@ -323,6 +329,10 @@ jobs:
           COMMON_LDFLAGS="$COMMON_LDFLAGS -Wl,--dynamic-linker=$LOADER"
         fi
 
+        # ENABLE_PLUGINS=OFF：内嵌目标无需 builtin 插件（telnetd/httpd 等），省 100KB+ text
+        # DEBUG 由 workflow_dispatch inputs.debug 控制（默认 OFF）：
+        # ON  保留 XFRPC_DEBUG 详细日志 + -g；OFF 走 CMakeLists 的 -Os 体积优化
+        if [ "$debug" = "true" ]; then DEBUG_FLAG=ON; else DEBUG_FLAG=OFF; fi
         cmake \
           -DCMAKE_C_COMPILER=$CC \
           -DCMAKE_C_FLAGS="$COMMON_CFLAGS $CFLAGS" \
@@ -340,7 +350,8 @@ jobs:
           -DMBEDTLS_LIBRARY=$SYSROOT/lib/libmbedtls.so \
           -DMBEDX509_LIBRARY=$SYSROOT/lib/libmbedx509.so \
           -DMBEDCRYPTO_LIBRARY=$SYSROOT/lib/libmbedcrypto.so \
-          -DDEBUG=ON \
+          -DENABLE_PLUGINS=OFF \
+          -DDEBUG=$DEBUG_FLAG \
           ..
 
         make -j$(nproc)

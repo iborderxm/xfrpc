@@ -329,7 +329,7 @@ build_deps() {
   fi
 
   # 汇总
-  info "依赖库: 本次编译 $built / 缓存命中 $skipped / 共 4"
+  info "依赖库: 本次编译 $built / 缓存命中 $skipped / 共 3"
 }
 
 # ============================================================
@@ -350,6 +350,8 @@ build_xfrpc() {
     local COMMON_CFLAGS="-I${SYSROOT}/include -Os -ffunction-sections -fdata-sections -Wno-error=array-bounds"
     local COMMON_LDFLAGS="-L${SYSROOT}/lib -Wl,--gc-sections -Wl,-rpath,\$ORIGIN"
 
+    # 内嵌构建禁用 builtin 插件（telnetd/httpd 等），省 100KB+ text
+    # DEBUG=ON 仅保留 XFRPC_DEBUG 详细日志；-O0 不再被强制追加，-Os 生效
     cmake \
       -DCMAKE_C_COMPILER="$CC" \
       -DCMAKE_C_FLAGS="$COMMON_CFLAGS" \
@@ -367,6 +369,7 @@ build_xfrpc() {
       -DMBEDTLS_LIBRARY="$SYSROOT/lib/libmbedtls.so" \
       -DMBEDX509_LIBRARY="$SYSROOT/lib/libmbedx509.so" \
       -DMBEDCRYPTO_LIBRARY="$SYSROOT/lib/libmbedcrypto.so" \
+      -DENABLE_PLUGINS=OFF \
       -DDEBUG=ON \
       ..
     make -j"$(nproc)"
